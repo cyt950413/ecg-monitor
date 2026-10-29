@@ -1,38 +1,663 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-Hant">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>我的第一個網站</title>
-  <style>
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      background: #eef6ff;
-      font-family: "Microsoft JhengHei", sans-serif;
-      color: #243047;
-    }
-
-    main {
-      width: min(80%, 600px);
-      padding: 36px;
-      background: white;
-      border-radius: 20px;
-      text-align: center;
-      box-shadow: 0 8px 30px #24304715;
-    }
-
-    h1 {
-      color: #2563eb;
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>歡迎來到我的網站！</h1>
-    <p>這是我使用 GitHub Pages 建立的第一個網站。</p>
-  </main>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ECG Monitor · 心電波形監測</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0c1320;
+        --panel: #141f30;
+        --line: #27374c;
+        --text: #e5edf7;
+        --muted: #98abc1;
+        --green: #54e2ad;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          15px/1.65 system-ui,
+          "Microsoft JhengHei",
+          sans-serif;
+      }
+      main {
+        max-width: 1220px;
+        margin: auto;
+        padding: 38px 24px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 28px;
+      }
+      h1 {
+        font-size: 28px;
+        margin: 0;
+      }
+      h2 {
+        font-size: 18px;
+        margin: 0 0 16px;
+      }
+      .eyebrow {
+        color: var(--green);
+        font-size: 12px;
+        letter-spacing: 3px;
+      }
+      p {
+        margin: 6px 0;
+        color: var(--muted);
+      }
+      .badge {
+        border: 1px solid var(--line);
+        border-radius: 30px;
+        padding: 7px 16px;
+        white-space: nowrap;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 22px;
+        margin: 18px 0;
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      button,
+      select {
+        font: inherit;
+        border: 1px solid #3a4d65;
+        border-radius: 8px;
+        background: #1d2c40;
+        color: var(--text);
+        padding: 9px 15px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button.primary {
+        background: var(--green);
+        color: #09251e;
+        border-color: var(--green);
+        font-weight: 700;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      button:focus-visible,
+      select:focus-visible,
+      a:focus-visible {
+        outline: 3px solid #65b7ff;
+        outline-offset: 3px;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        margin-top: 20px;
+      }
+      .stat {
+        padding: 16px;
+        background: #101a29;
+        border-radius: 10px;
+      }
+      .stat span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .stat strong {
+        font-size: 23px;
+        font-variant-numeric: tabular-nums;
+      }
+      .graph-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 360px;
+        margin-top: 16px;
+        border-radius: 8px;
+        background: #0b1521;
+      }
+      .legend {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      #message {
+        min-height: 25px;
+        margin-top: 14px;
+      }
+      #message.error {
+        color: #ffad9f;
+      }
+      .note {
+        border-left: 3px solid #e6bd70;
+        padding-left: 14px;
+      }
+      .help {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 28px;
+      }
+      a {
+        color: var(--green);
+      }
+      code {
+        color: #a8d8ff;
+      }
+      footer {
+        color: var(--muted);
+        font-size: 12px;
+        text-align: center;
+        margin-top: 28px;
+      }
+      @media (max-width: 650px) {
+        main {
+          padding: 22px 14px;
+        }
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .stats {
+          grid-template-columns: 1fr 1fr;
+        }
+        .panel {
+          padding: 16px;
+        }
+        .help {
+          grid-template-columns: 1fr;
+        }
+        canvas {
+          height: 280px;
+        }
+        h1 {
+          font-size: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="eyebrow">ESP32 / AD8232</div>
+          <h1>心電波形監測</h1>
+          <p>USB 序列連線，即時查看原始 ECG 訊號</p>
+        </div>
+        <div class="badge" id="connection" role="status">● 尚未連線</div>
+      </header>
+      <div class="note">
+        <p>
+          人體量測須使用適當的醫療級電氣隔離。一般 USB
+          直連電腦不具人體保護隔離；未具備隔離設備時，請先移除人體電極，以訊號模擬器測試。本介面僅供學習，不供醫療診斷。
+        </p>
+      </div>
+      <section class="panel" aria-label="序列連線設定">
+        <div class="toolbar">
+          <label for="baud">鮑率</label
+          ><select id="baud">
+            <option>115200</option>
+            <option>57600</option>
+            <option>9600</option></select
+          ><button class="primary" id="connect">連接 ESP32</button
+          ><button id="disconnect" disabled>中斷連線</button
+          ><button id="demo">啟動示範</button>
+        </div>
+        <p id="message" role="status" aria-live="polite">
+          請使用電腦版 Chrome 或 Edge，透過 HTTPS 或 localhost 開啟。
+        </p>
+        <div class="stats">
+          <div class="stat">
+            <span>電極狀態</span><strong id="contact">—</strong>
+          </div>
+          <div class="stat">
+            <span>最新原始值 / ADC</span><strong id="adc">—</strong>
+          </div>
+          <div class="stat">
+            <span>實際接收率 / Hz</span><strong id="rate">—</strong>
+          </div>
+          <div class="stat">
+            <span>已接收樣本</span><strong id="count">0</strong>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="graph-head">
+          <div>
+            <h2>即時心電波形</h2>
+            <p id="source">等待資料 · 原始 ADC，未換算為 mV</p>
+          </div>
+          <div class="toolbar">
+            <label for="window">顯示時間</label
+            ><select id="window">
+              <option value="5">5 秒</option>
+              <option value="10" selected>10 秒</option>
+              <option value="20">20 秒</option></select
+            ><button id="pause">暫停顯示</button
+            ><button id="clear">清除資料</button
+            ><button id="export" disabled>匯出 CSV</button>
+          </div>
+        </div>
+        <canvas
+          id="wave"
+          role="img"
+          aria-label="即時心電波形：橫軸時間，縱軸原始 ADC 值 0 至 4095"
+        ></canvas>
+        <div class="legend">
+          <span>ADC 0–4095 · 僅繪製接觸穩定的資料</span
+          ><span id="buffer">保留最近 60 秒，最多 15,000 筆</span>
+        </div>
+      </section>
+      <section class="panel help">
+        <div>
+          <h2>開始量測</h2>
+          <ol>
+            <li>
+              將
+              <a href="firmware/ECGSerial/ECGSerial.ino" download
+                >ECGSerial.ino</a
+              >
+              燒錄至 ESP32，保留原本 TFT 與 AD8232 接線。
+            </li>
+            <li>以 USB 連接 ESP32，關閉 Arduino 序列監控視窗。</li>
+            <li>選擇 115200，按「連接 ESP32」並選取序列埠。</li>
+            <li>電極重新接觸後需等待 3 秒穩定；暫停僅凍結顯示，接收持續。</li>
+          </ol>
+        </div>
+        <div>
+          <h2>資料與連線說明</h2>
+          <p>
+            格式：<code>時間_ms,ADC,狀態\n</code>；狀態 0 為電極脫落、1
+            為穩定中、2 為正常。取樣目標 250 Hz，實際速度可能受 TFT 繪圖影響。
+          </p>
+          <p>
+            示範資料由程式產生，與實際量測分開。CSV
+            匯出包含目前緩衝區的時間、ADC、狀態與來源，不會上傳資料。
+          </p>
+          <p>
+            若無法連線，請確認 USB 資料線、驅動與序列埠使用權限；Safari、Firefox
+            與多數行動瀏覽器不支援 Web Serial。
+          </p>
+        </div>
+      </section>
+      <footer>ECG MONITOR · 本機處理 · 無外部服務依賴</footer>
+    </main>
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id);
+      const serialSupported =
+        !!navigator.serial &&
+        typeof navigator.serial.requestPort === "function";
+      const MAX_SAMPLES = 15000,
+        STATUS = ["電極脫落", "等待穩定", "接觸正常"];
+      let samples = [],
+        total = 0,
+        port = null,
+        reader = null,
+        readTask = null,
+        closing = false,
+        connecting = false,
+        demoTimer = null,
+        paused = false,
+        frozen = [],
+        lastArrival = 0,
+        rateStart = performance.now(),
+        rateCount = 0,
+        mode = "idle";
+      let deviceLast = null,
+        deviceEpoch = 0,
+        deviceBase = null,
+        lastTime = -1;
+      function message(text, error = false) {
+        $("message").textContent = text;
+        $("message").classList.toggle("error", error);
+      }
+      function controls() {
+        const busy = !!port || connecting;
+        $("connect").disabled =
+          busy || !!demoTimer || !serialSupported || !isSecureContext;
+        $("disconnect").disabled = !port || connecting || closing;
+        $("baud").disabled = busy;
+        $("demo").disabled = busy;
+        $("demo").textContent = demoTimer ? "停止示範" : "啟動示範";
+        $("connection").textContent = port
+          ? "● USB 已連線"
+          : demoTimer
+            ? "● 示範模式"
+            : "● 尚未連線";
+      }
+      function reset() {
+        samples = [];
+        frozen = [];
+        total = 0;
+        deviceLast = null;
+        deviceEpoch = 0;
+        deviceBase = null;
+        lastTime = -1;
+        lastArrival = 0;
+        rateCount = 0;
+        rateStart = performance.now();
+        $("count").textContent = "0";
+        $("adc").textContent = "—";
+        $("contact").textContent = "—";
+        $("rate").textContent = "—";
+        $("export").disabled = true;
+      }
+      function parseLine(line) {
+        const parts = line.trim().split(",");
+        if (parts.length !== 3 || parts.some((v) => !/^\d+$/.test(v)))
+          return null;
+        const [ms, adc, status] = parts.map(Number);
+        return Number.isSafeInteger(ms) &&
+          ms <= 4294967295 &&
+          adc <= 4095 &&
+          status <= 2
+          ? { ms, adc, status }
+          : null;
+      }
+      // Bound partial lines, including a stream that never sends a newline.
+      function lineDecoder(onLine) {
+        let pending = "",
+          dropping = false;
+        return (chunk) => {
+          for (const ch of chunk) {
+            if (ch === "\n") {
+              if (!dropping) onLine(pending.replace(/\r$/, ""));
+              pending = "";
+              dropping = false;
+            } else if (!dropping) {
+              pending += ch;
+              if (pending.length > 128) {
+                pending = "";
+                dropping = true;
+              }
+            }
+          }
+        };
+      }
+      function accept(record) {
+        let { ms, adc, status } = record;
+        if (deviceLast !== null && ms < deviceLast) {
+          if (deviceLast > 0xf0000000 && ms < 0x0fffffff)
+            deviceEpoch += 4294967296;
+          else {
+            deviceEpoch = lastTime + 4;
+            deviceBase = ms;
+          }
+        }
+        if (deviceBase === null) deviceBase = ms;
+        deviceLast = ms;
+        const time = ms - deviceBase + deviceEpoch;
+        if (time <= lastTime) return;
+        lastTime = time;
+        const now = performance.now();
+        lastArrival = now;
+        samples.push({ time, ms, adc, status, source: mode });
+        while (
+          samples.length &&
+          (samples.length > MAX_SAMPLES || time - samples[0].time > 60000)
+        )
+          samples.shift();
+        total++;
+        rateCount++;
+        $("count").textContent = total.toLocaleString();
+        $("adc").textContent = status === 0 ? "—" : adc;
+        $("contact").textContent = STATUS[status];
+        $("export").disabled = false;
+      }
+      async function readLoop(activePort) {
+        const decoder = new TextDecoder();
+        const feed = lineDecoder((line) => {
+          const record = parseLine(line);
+          if (record) accept(record);
+        });
+        try {
+          while (!closing && activePort.readable) {
+            reader = activePort.readable.getReader();
+            try {
+              while (!closing) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                feed(decoder.decode(value, { stream: true }));
+              }
+            } finally {
+              reader.releaseLock();
+              reader = null;
+            }
+            break;
+          }
+          if (!closing) message("裝置已中斷連線，請重新連接。", true);
+        } catch (error) {
+          if (!closing) message("序列讀取失敗：" + error.message, true);
+        } finally {
+          try {
+            await activePort.close();
+          } catch (error) {
+            message("序列埠關閉失敗：" + error.message, true);
+          }
+          if (port === activePort) port = null;
+          closing = false;
+          $("source").textContent = "USB 已中斷 · 保留最後接收資料";
+          controls();
+        }
+      }
+      $("connect").onclick = async () => {
+        if (connecting || port) return;
+        connecting = true;
+        controls();
+        let selected;
+        try {
+          selected = await navigator.serial.requestPort();
+          await selected.open({ baudRate: Number($("baud").value) });
+          port = selected;
+          reset();
+          mode = "usb";
+          $("source").textContent = "USB 即時資料 · 原始 ADC";
+          message("已連線，等待 ESP32 傳送資料。");
+          readTask = readLoop(selected);
+        } catch (error) {
+          message(
+            error.name === "NotFoundError"
+              ? "已取消選擇序列埠。"
+              : "無法連線：" + error.message,
+            error.name !== "NotFoundError",
+          );
+        } finally {
+          connecting = false;
+          controls();
+        }
+      };
+      $("disconnect").onclick = async () => {
+        if (!port || closing) return;
+        closing = true;
+        controls();
+        try {
+          if (reader) await reader.cancel();
+          await readTask;
+          message("已中斷連線，資料保留於本頁。");
+        } catch (error) {
+          message("中斷失敗：" + error.message, true);
+        } finally {
+          closing = false;
+          controls();
+        }
+      };
+      $("demo").onclick = () => {
+        if (demoTimer) {
+          clearInterval(demoTimer);
+          demoTimer = null;
+          $("source").textContent = "示範已停止 · 非實際量測";
+          message("示範已停止。");
+        } else {
+          reset();
+          mode = "demo";
+          let t = 0;
+          demoTimer = setInterval(() => {
+            for (let i = 0; i < 5; i++) {
+              t += 4;
+              const phase = (t % 830) / 830;
+              const pulse =
+                Math.exp(-(((phase - 0.23) / 0.016) ** 2)) * 1500 -
+                Math.exp(-(((phase - 0.27) / 0.025) ** 2)) * 420 +
+                Math.exp(-(((phase - 0.48) / 0.07) ** 2)) * 230;
+              accept({
+                ms: t,
+                adc: Math.round(1800 + pulse + Math.sin(t / 800) * 40),
+                status: 2,
+              });
+            }
+          }, 20);
+          $("source").textContent = "示範資料 · 程式合成，非實際量測";
+          message("示範模式已啟動；連接裝置前請先停止示範。");
+        }
+        controls();
+      };
+      $("pause").onclick = () => {
+        paused = !paused;
+        frozen = paused ? samples.slice() : [];
+        $("pause").textContent = paused ? "繼續顯示" : "暫停顯示";
+        $("pause").setAttribute("aria-pressed", String(paused));
+      };
+      $("clear").onclick = reset;
+      $("export").onclick = () => {
+        const csv =
+          "time_ms,device_ms,adc,status,source\n" +
+          samples
+            .map((s) => [s.time, s.ms, s.adc, s.status, s.source].join(","))
+            .join("\n");
+        const url = URL.createObjectURL(
+          new Blob([csv], { type: "text/csv;charset=utf-8" }),
+        );
+        const a = document.createElement("a");
+        a.href = url;
+        a.download =
+          "ecg-" +
+          mode +
+          "-" +
+          new Date().toISOString().replace(/[:.]/g, "-") +
+          ".csv";
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+      const canvas = $("wave"),
+        ctx = canvas.getContext("2d");
+      function draw() {
+        const rect = canvas.getBoundingClientRect(),
+          dpr = window.devicePixelRatio || 1;
+        if (
+          canvas.width !== Math.round(rect.width * dpr) ||
+          canvas.height !== Math.round(rect.height * dpr)
+        ) {
+          canvas.width = Math.round(rect.width * dpr);
+          canvas.height = Math.round(rect.height * dpr);
+        }
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const w = rect.width,
+          h = rect.height,
+          left = 45,
+          right = w - 12,
+          top = 18,
+          bottom = h - 28;
+        ctx.clearRect(0, 0, w, h);
+        ctx.font = "11px system-ui";
+        ctx.fillStyle = "#91a6bd";
+        ctx.lineWidth = 1;
+        const duration = Number($("window").value) * 1000;
+        for (let i = 0; i <= 4; i++) {
+          const y = top + ((bottom - top) * i) / 4;
+          ctx.strokeStyle = "#243449";
+          ctx.beginPath();
+          ctx.moveTo(left, y);
+          ctx.lineTo(right, y);
+          ctx.stroke();
+          ctx.fillText(String(Math.round(4095 * (1 - i / 4))), 4, y + 4);
+        }
+        for (let i = 0; i <= 10; i++) {
+          const x = left + ((right - left) * i) / 10;
+          ctx.strokeStyle = "#1c2a3d";
+          ctx.beginPath();
+          ctx.moveTo(x, top);
+          ctx.lineTo(x, bottom);
+          ctx.stroke();
+          if (i % 2 === 0)
+            ctx.fillText(
+              (((i / 10 - 1) * duration) / 1000).toFixed(0) + "s",
+              x - 9,
+              h - 8,
+            );
+        }
+        const data = paused ? frozen : samples,
+          end = data.length ? data[data.length - 1].time : 0,
+          start = end - duration;
+        ctx.strokeStyle = "#54e2ad";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        let previous = null;
+        for (const s of data) {
+          if (s.time < start) continue;
+          if (s.status !== 2) {
+            previous = null;
+            continue;
+          }
+          const x = left + ((s.time - start) / duration) * (right - left),
+            y = bottom - (s.adc / 4095) * (bottom - top);
+          if (!previous || s.time - previous.time > 100) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+          previous = s;
+        }
+        ctx.stroke();
+        if (!data.length) {
+          ctx.fillStyle = "#91a6bd";
+          ctx.textAlign = "center";
+          ctx.fillText("連接 ESP32 或啟動示範以查看波形", w / 2, h / 2);
+          ctx.textAlign = "start";
+        }
+        requestAnimationFrame(draw);
+      }
+      setInterval(() => {
+        const now = performance.now(),
+          elapsed = now - rateStart;
+        $("rate").textContent =
+          lastArrival && now - lastArrival < 2000
+            ? ((rateCount * 1000) / elapsed).toFixed(0)
+            : "0";
+        rateCount = 0;
+        rateStart = now;
+        if ((port || demoTimer) && lastArrival && now - lastArrival > 2000) {
+          $("contact").textContent = "資料中斷";
+          $("adc").textContent = "—";
+        }
+      }, 1000);
+      if (!isSecureContext)
+        message("Web Serial 需要 HTTPS 或 localhost。", true);
+      else if (!serialSupported)
+        message(
+          "此瀏覽器不支援 Web Serial，請改用電腦版 Chrome 或 Edge；仍可啟動示範。",
+          true,
+        );
+      controls();
+      draw();
+    </script>
+  </body>
 </html>
