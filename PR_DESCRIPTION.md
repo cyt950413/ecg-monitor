@@ -1,9 +1,12 @@
-以 Web Serial 建立 ESP32 ECG 即時監測網站，並保留原 TFT 功能
+目前網站只顯示原始 ECG，CSV 只匯出會持續淘汰舊資料的即時緩衝。此變更新增原始/60 Hz 濾波/上下比較，以及停止後不再被覆蓋的獨立記錄。
 
-目前 index.html 僅有歡迎頁。此變更新增 USB Web Serial 連線、原始 ADC 波形、電極狀態與 3 秒穩定狀態、暫停、時間窗、CSV 匯出及獨立示範模式。
+- 二階 IIR notch：Fs 250 Hz、60 Hz、Q 30，與 SciPy iirnotch 相同；依樣本順序更新，於中斷/重啟/接觸無效時重設並標示 250 筆暖機。
+- 原始 ADC 與飽和值保留；共用尺度及時間軸，不插值、不增加基線修正、平滑或 BPM。
+- 60 秒即時緩衝與最長 5 分鐘/75,000 筆記錄分開；上限自動停止、舊紀錄須明確刪除，USB/示範不混用。
+- CSV 追加濾波值、暖機/飽和/重設及參數欄位；可在本機載入舊/新 CSV，使用同一份原始資料比較。
 
-新增 firmware/ECGSerial/ECGSerial.ino，以原 AAAA.ino 為基礎保留所有接腳、TFT 繪圖及等待邏輯，並傳送 115200 baud 的 timestamp_ms,raw_adc,status CSV。TX 空間不足時略過資料以維持 TFT 運作。附使用說明、協定、瀏覽器測試及韌體主機邏輯測試。
+已改用最新附件 ecg-usb-2026-10-29T15-48-05-647Z.csv，共 14,997 筆、60 秒，正常狀態有 19 筆 ADC＝4095，共同穩態窗口的 58–62 Hz 功率由 55248.4567 降為 108.3322 ADC²（−27.08 dB）；5–40 Hz 功率幾乎不變。保留所有原始 ADC，不將濾波視為修復截頂或醫療認證。未提交原始 CSV。
 
-驗證：Chromium 模擬 Web Serial 與手機版面測試通過；C++17 主機替身測試在 -Wall -Wextra -Werror 下通過。詳見 TEST_RESULTS.md。尚無 ESP32 工具鏈與實體硬體，需後續實機編譯、USB/TFT 驗證。
+驗證：核心合成訊號/記錄/CSV 測試、兩組 Chromium 測試（含實測檔匯入）、獨立 SciPy 係數與輸出比對通過；詳見 TEST_RESULTS.md、reports/csv-analysis.json 與頻譜圖。未連接實體硬體。
 
-本 PR 不合併、不部署；合併前請確認既有 GitHub Pages 設定。
+ESP32 韌體、硬體腳位與 USB 格式完全不變。本 PR 不自動合併或部署；README 提供合併、GitHub Pages 更新、強制重新整理與同檔比較步驟。

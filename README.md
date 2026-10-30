@@ -1,31 +1,19 @@
 # ECG Monitor
 
-ESP32 + AD8232 的 USB 序列心電波形監測介面。直接修改根目錄 `index.html`，沒有建置步驟、CDN 或後端；資料僅保留於瀏覽器記憶體。
+ESP32 + AD8232 的 USB 心電波形介面。資料只在本機瀏覽器處理，沒有 CDN、後端或上傳功能。這次只更新網頁：**硬體腳位、USB 格式與 `firmware/ECGSerial/ECGSerial.ino` 完全不變**，不必重新燒錄。
 
-## 使用
+## 合併與更新網站
 
-1. Arduino IDE 安裝 Espressif ESP32 board package、Adafruit GFX Library、Adafruit ILI9341（以及 IDE 提示的 Adafruit BusIO 相依套件）。
-2. 開啟 `firmware/ECGSerial/ECGSerial.ino`，選擇實際使用的 ESP32 開發板與序列埠，編譯後上傳。以原附檔的傳統 ESP32 接腳為準，不適用所有 ESP32 變體。
-3. 關閉 Arduino Serial Monitor / Serial Plotter，以免占用序列埠。
-4. 在現有 HTTPS 網站開啟 `index.html`，或本機執行 `python3 -m http.server 8000` 後以電腦版 Chrome / Edge 開啟 `http://localhost:8000`。不要依賴直接開啟 file URL。
-5. 網頁選擇 **115200**，按「連接 ESP32」，從瀏覽器選擇裝置。其餘鮑率選項只有在同步修改韌體 `Serial.begin` 時才適用。
+1. 開啟本次 PR，確認目標為 `main`，檢查 Files changed 與測試紀錄後按 **Merge pull request → Confirm merge**。若是 Draft PR，先按 **Ready for review**。
+2. 若 GitHub Pages 設為從 `main` 發布，合併會觸發原有發布流程。到儲存庫 **Actions** 或 **Settings → Pages** 確認部署完成。本次開發只推送功能分支，未合併或自行發布。
+3. 開啟 `https://cyt950413.github.io/ecg-monitor/`（若有自訂 Pages 網址，以 Settings → Pages 顯示為準），按 **Ctrl+Shift+R**（macOS：**Cmd+Shift+R**）強制重新整理。應看見「上下比較」「獨立記錄」「用同一份 CSV 比較」。
+4. 若看到舊版，確認 Pages 的來源分支與部署結果，再於 DevTools Network 勾選 Disable cache 重新整理。`index.html` 和新增的 `ecg-core.js` 必須同時部署；不需建置。
 
-本次變更不部署或發布網站。GitHub Pages 若已設定，請於審查及合併時自行確認其發布行為。
+本機測試可執行 `python3 -m http.server 8000`，以電腦版 Chrome / Edge 開啟 `http://localhost:8000`。Web Serial 需要 HTTPS 或 localhost；Safari、Firefox 與多數行動瀏覽器不支援，但仍可載入 CSV 或示範。
 
-## 原接線與 TFT 功能
+## 即時操作與原接線
 
-| 功能                  | ESP32 GPIO   |
-| --------------------- | ------------ |
-| ILI9341 CS / DC / RST | 27 / 25 / 26 |
-| TFT SCK / MOSI        | 18 / 23      |
-| AD8232 OUTPUT         | 34           |
-| AD8232 LO+ / LO−      | 13 / 14      |
-
-保留 12 位元 ADC、原 SPI/TFT 設定、波形範圍、格線、每五筆最大/最小值繪圖與三種 TFT 接觸狀態。電極脫落時停止 TFT 新波形；重新接觸後等待三秒。未連接瀏覽器仍可使用 TFT。原檔案僅作為程式來源，未將其中註解視為額外使用者指示。
-
-## 序列協定
-
-115200 baud、8N1、ASCII CSV，每筆以 LF 換行（網頁也接受 CRLF）：
+保留現有可正常運作的韌體、TFT 與 AD8232 接線。關閉 Arduino Serial Monitor / Plotter 後選 **115200**，按「連接 ESP32」選取序列埠。USB 仍為 8N1 ASCII `timestamp_ms,raw_adc,status\n`（接受 CRLF）：
 
 ```text
 1234,2048,2
@@ -33,36 +21,94 @@ ESP32 + AD8232 的 USB 序列心電波形監測介面。直接修改根目錄 `i
 1242,1980,1
 ```
 
-欄位為 `timestamp_ms,raw_adc,status`：
+狀態為 0 電極脫落、1 等待穩定、2 正常。TFT 接腳 CS/DC/RST＝27/25/26、SCK/MOSI＝18/23；AD8232 OUTPUT＝34、LO+/LO−＝13/14。網站不會對裝置傳送控制資料，也不變更原三秒接觸穩定等待。
 
-- `timestamp_ms`：ESP32 `millis()`，unsigned 32-bit。網頁處理約 49.7 天溢位與裝置重新啟動，CSV 同時保留原裝置時間與正規化時間。
-- `raw_adc`：0–4095 的原始值，未做電壓校正；電極脫落時送 0 作為佔位，不畫成有效訊號。
-- `status`：0 電極脫落、1 等待穩定、2 正常。
+## 原始與濾波比較
 
-目標取樣週期 4000 μs（250 Hz）。此版本維持原本單迴圈 TFT 架構，繪圖可能延遲取樣；不補造樣本。序列 TX 空間不足時略過整筆資料，避免因電腦未讀取阻塞 TFT。網頁接收率是有效資料筆數/實際經過時間；超過 100 ms 的資料缺口不連線繪圖，實際取樣時間以裝置時間戳為準。
+「波形顯示」可選 **原始波形 / 60 Hz 濾波波形 / 上下比較**。上下圖共用同一時間範圍與固定 ADC 尺度 −512–4607，包含一定的濾波超越量；超出顯示範圍僅裁切畫面，不裁切數值。未換算 mV。無效接觸樣本保留於緩衝與匯出，但不連成有效心電波形。
 
-## 網頁功能
+- 原始 `adc`、裝置時間與狀態永遠保留，不以濾波值覆寫，不插值、不補造缺失樣本。重複時間的有效 CSV 樣本也保留，並觸發濾波重設。循環緩衝僅供畫面；需要保存全部資料時，請使用獨立記錄。
+- 二階因果 IIR notch：**Fs＝250 Hz、f0＝60 Hz、Q＝30**，Q 定義為中心頻率 / −3 dB 頻寬（2 Hz），與 `scipy.signal.iirnotch(60,30,fs=250)` 相同，版本 `iirnotch-v1`。
+- 每筆資料進入時才更新一次濾波器。`requestAnimationFrame` 只讀取計算結果；切換波形、視窗長度、暫停及畫面幀率不影響濾波結果。
+- 啟動、資料來源切換、裝置重啟、相鄰時間不等於 4 ms（含重複時間）、接觸狀態非 2、序列中斷或超過 2 秒未收到資料時重設。32-bit `millis()` 正常溢位按連續時間處理，不誤認為重啟。4 ms 為此版本固定 Fs 的嚴格連續條件，不代表所有裝置時間抖動皆為遺失樣本。
+- 每次恢復後前 **250 筆有效且連續樣本**標示暖機（約 1 秒），濾波圖以黃色顯示。以第一筆 ADC 的常數輸入狀態初始化，減少零初始狀態造成的虛假 DC 跳變；不是基線修正。暖機長度是此初版工程選擇，不是量測品質保證。
+- 此濾波會有**頻率相關的相位/群延遲**，不是固定幾毫秒，也不是零相位。不移動時間軸來假裝對齊，不加強力平滑、基線修正或 BPM。
+- ADC＝0 或 4095 原值保留並標示可能飽和；正常與無效狀態端點值分開計數。原始圖紅點標出正常狀態的端點值。**濾波無法修復截頂，也無法證明訊號來自有效心電活動。**
 
-- 使用者主動選擇 USB 序列埠；錯誤、取消、無支援、安全來源需求與中斷連線提示。
-- Canvas 原始 ECG、5/10/20 秒時間窗、接觸狀態、ADC、接收率、樣本計數。
-- 暫停僅凍結波形，接收不中斷；清除資料會清空即時與凍結緩衝區。
-- 記憶體保留最近 60 秒且最多 15,000 筆；匯出此範圍 CSV（`time_ms,device_ms,adc,status,source`）。
-- 示範與 USB 模式互斥，切換來源時清除舊資料，CSV 明確標記 `demo` / `usb`。
-- 忽略不符合協定的開機日誌、超長行、錯誤欄位及超出範圍資料。
+差分方程為 `y[n]=b0*x[n]+b1*x[n−1]+b2*x[n−2]−a1*y[n−1]−a2*y[n−2]`，係數：
 
-## 驗證
-
-瀏覽器測試需 Node.js、Playwright 與 Chromium；執行 `npm install --no-save --package-lock=false playwright@1.62.1` 安裝測試相依套件（不影響網站執行）。測試使用 Playwright route 在 `https://localhost/` 提供 HTML，並模擬 Web Serial，不會連外或連接真實裝置。
-
-```sh
-node tests/browser.cjs
-# 若 Chromium 不在 /usr/bin/chromium：
-CHROMIUM_PATH=/path/to/chromium node tests/browser.cjs
-
-g++ -std=c++17 -Wall -Wextra -Werror -I tests/arduino-stubs tests/firmware.cpp -o /tmp/ecg-firmware-test
-/tmp/ecg-firmware-test
+```text
+b = [0.975478390750534, -0.12250158988968947, 0.975478390750534]
+a = [1, -0.12250158988968947, 0.9509567815010681]
+w0 = 2*pi*60/250; beta = tan(w0/(2*30)); gain = 1/(1+beta)
 ```
 
-韌體測試使用主機端 Arduino/TFT 替身，驗證邏輯，不等同 ESP32 工具鏈編譯。環境未提供 arduino-cli、ESP32 core 或實體裝置；尚需 Arduino IDE 實際編譯與板端驗證。
+## 暫停顯示與獨立記錄
 
-實機驗收：確認 TFT 狀態與網頁一致、電極重接等待三秒、USB 拔除/重連可再次選埠、關閉網頁仍可獨立使用 TFT、CSV 時間與訊號一致。人體量測需適當醫療級電氣隔離；未隔離時先移除人體電極，使用訊號模擬器測試。本專案僅供學習，不供診斷。
+| 操作         | 效果                                                                     |
+| ------------ | ------------------------------------------------------------------------ |
+| 暫停顯示     | 凍結目前畫面；接收、濾波與記錄持續                                       |
+| 清除即時畫面 | 只清空即時緩衝與凍結畫面；不重設裝置時間、濾波或已存紀錄；CSV 檢視時停用 |
+| 匯出即時緩衝 | 匯出最近 60 秒、最多 15,000 筆；不是完整長時間紀錄                       |
+| 開始記錄     | 從按下後的下一筆資料開始，另存獨立陣列，不共享即時循環緩衝的淘汰操作     |
+| 停止記錄     | 固定已存資料；後續接收、清除畫面、切換來源或匯入檔案不會覆蓋             |
+| 匯出紀錄     | 匯出停止後保存的整段資料，檔名含 `recording` 與來源                      |
+| 刪除已存紀錄 | 要求明確確認後才刪除；請先匯出，才能開始下一段                           |
+
+記錄上限為 **5 分鐘或 75,000 筆**，以先達者自動停止並顯示原因，不淘汰舊紀錄。同時檢查瀏覽器經過時間及資料時間；沒有新樣本也會停止。背景分頁計時器被瀏覽器延後時，提示可能延後更新，但下一筆資料加入前會先檢查限制。序列連線或示範停止也自動停止記錄。USB 與示範不混寫於同一紀錄。已存紀錄存在時不能開始另一段；停止後不會自行消失。
+
+記錄保存在**記憶體**，不是永久儲存。頁面會在有紀錄時提示離開，但仍須在關閉或重新整理前主動下載 CSV。
+
+## CSV 格式與同檔比較
+
+新版 CSV 保留前五欄，新增獨立欄位，不改 USB 裝置格式：
+
+```text
+time_ms,device_ms,adc,status,source,filtered_adc,filter_warmup,saturated,filter_reset,segment,filter_fs_hz,filter_center_hz,filter_q,filter_version
+```
+
+`time_ms` 為網頁正規化時間（裝置重啟後接續顯示）；`device_ms` 為未改動的裝置時間。`source`＝`usb` / `demo`。無效接觸時 `filtered_adc` 留空；浮點濾波值不四捨五入或限制於 0–4095。暖機、可能飽和旗標為 0/1；`filter_reset` 與 `segment` 記載重設邊界，每行另附 Fs、中心頻率、Q 與版本。
+
+用同一份資料比較：
+
+1. 保存舊版實測 CSV；不必重新量測來比較不同時間的人體訊號。
+2. 更新網站後先停止 USB / 示範，在「用同一份 CSV 比較」選原檔。
+3. 原始 `time_ms`、`device_ms`、`adc`、`status` 與來源完整保留。最多載入 75,000 筆、20 MiB；超限、混合來源或格式錯誤時整份拒絕，保留原畫面，不偷偷截斷。
+4. 切換三種顯示，使用相同的時間窗與檢視終點滑桿，觀察同一段的原始值、濾波值、暖機與飽和提示。滑桿使用 CSV 原本的 `time_ms` 秒數。
+5. 舊版五欄與新版 CSV 都可讀取；一律依原始 ADC 重算，不採用 CSV 既有濾波值。新版的重設註記也用於重建中斷邊界。匯入後前一秒會重新暖機；若原紀錄從持續運作的濾波器中途開始，起始輸出可能與原先即時計算不同。這是初始化差異，不改動原始 ADC。
+6. 匯入資料與已停止的獨立記錄分開。匯入不是開始新量測，不會寫入紀錄；原始檔仍由你自行保存。
+
+如需定量比較，在本機執行：
+
+```sh
+node tests/analyze-csv.cjs path/to/your.csv /tmp/ecg-analysis
+```
+
+輸出 `csv-analysis.json` 與 `csv-spectrum.svg`。使用共同的正常/過暖機/連續 4 ms 區段，以 1024 點 Hann、50% 重疊 Welch PSD 比較；不跨缺口或插值。此分析只排除不適合估計穩態頻譜的區段，**不刪除原檔任何資料**。若沒有足夠長的有效區段，明確回報無法估計。
+
+## 這次附件的結果與測試
+
+已改用最新附件 `ecg-usb-2026-10-29T15-48-05-647Z.csv`：**14,997 筆、60 秒、平均 249.933 Hz**，正常狀態有 **0 筆 ADC＝0、19 筆 ADC＝4095**，只有 **1 個 20 ms 間隔**，其餘為 4 ms。這份附件符合最初提供的統計，SHA-256 見 [測試紀錄](TEST_RESULTS.md)。
+
+相同樣本的 58–62 Hz 頻帶功率由 **55248.4567 降為 108.3322 ADC²（−27.08 dB）**；5–40 Hz 功率由 **48745.6504 降為 48739.9782 ADC²**。原始主峰位於 60.0586 Hz 頻率格點。這是這份資料、這些穩態區段的結果，不代表所有 60 Hz 干擾都會消失，也不代表飽和、接觸或雜訊問題已解決。未將原始 CSV 加入儲存庫。
+
+![實測 CSV 濾波前後的頻譜比較](reports/csv-spectrum.svg)
+
+執行測試（網站本身沒有 npm 相依套件）：
+
+```sh
+node tests/core.cjs
+# 瀏覽器測試需 Playwright 與 Chromium
+npm install --no-save --package-lock=false playwright@1.62.1
+node tests/browser.cjs
+node tests/notch-browser.cjs
+# 可選：附上自己的檔案，同時測試實測 CSV 匯入
+node tests/notch-browser.cjs path/to/ecg-usb-2026-10-29T15-48-05-647Z.csv
+# Chromium 不在 /usr/bin/chromium 時，設定 CHROMIUM_PATH
+# 可選獨立科學計算參考驗證，需要 NumPy / SciPy
+python3 tests/scipy-reference.py
+```
+
+核心測試涵蓋已知 10+60 Hz 訊號的選擇性抑制、DC 保留、暖機與重設、停止後不覆蓋、雙上限、來源隔離與 CSV。瀏覽器測試使用模擬 Web Serial，不連實體裝置。[完整紀錄](TEST_RESULTS.md)列出結果及限制。
+
+本網站不是醫療診斷工具，濾波後外觀改善不構成量測品質認證。保留原有人體量測電氣隔離要求；未隔離時請先移除人體電極，以訊號模擬器測試。

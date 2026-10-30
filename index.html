@@ -255,30 +255,76 @@
               <option value="10" selected>10 秒</option>
               <option value="20">20 秒</option></select
             ><button id="pause">暫停顯示</button
-            ><button id="clear">清除資料</button
-            ><button id="export" disabled>匯出 CSV</button>
+            ><button id="clear">清除即時畫面</button
+            ><button id="export" disabled>匯出即時緩衝</button>
+            <label for="view">波形顯示</label
+            ><select id="view">
+              <option value="raw">原始波形</option>
+              <option value="filtered">60 Hz 濾波波形</option>
+              <option value="compare" selected>上下比較</option>
+            </select>
           </div>
         </div>
+        <p id="filter-info">
+          二階 IIR notch · Fs 250 Hz · 60 Hz · Q＝30 · 啟動/中斷後暖機 250
+          筆（約 1 秒）。因果濾波會產生頻率相關相位延遲，非固定延遲、非零相位。
+        </p>
+        <p id="filter-state" role="status">等待資料</p>
+        <p id="saturation" role="status">
+          原始 ADC 保持不變；濾波無法修復截頂。
+        </p>
         <canvas
           id="wave"
           role="img"
-          aria-label="即時心電波形：橫軸時間，縱軸原始 ADC 值 0 至 4095"
+          aria-label="心電波形比較：共用時間軸與 ADC 尺度；原始值保持不變"
         ></canvas>
         <div class="legend">
-          <span>ADC 0–4095 · 僅繪製接觸穩定的資料</span
+          <span>共用尺度 −512–4607 · 黃色為暖機 · 紅點為原始 ADC 飽和值</span
           ><span id="buffer">保留最近 60 秒，最多 15,000 筆</span>
         </div>
+      </section>
+      <section class="panel" aria-label="獨立記錄">
+        <h2>獨立記錄</h2>
+        <div class="toolbar">
+          <button id="record-start" class="primary">開始記錄</button
+          ><button id="record-stop" disabled>停止記錄</button
+          ><button id="record-export" disabled>匯出紀錄</button
+          ><button id="record-discard" disabled>刪除已存紀錄</button>
+        </div>
+        <p id="record-state" role="status" aria-live="polite">尚未記錄</p>
+        <p>
+          記錄與暫停顯示分開。最多 5 分鐘或 75,000
+          筆，達上限自動停止。停止後不會被覆蓋；開始新紀錄前須先刪除舊紀錄（請先匯出）。資料只在本機記憶體，關閉或重新整理頁面前請匯出。
+        </p>
+      </section>
+      <section class="panel" aria-label="本機 CSV 比較">
+        <h2>用同一份 CSV 比較</h2>
+        <label for="csv-file">選擇舊版或新版匯出的 CSV（僅在本機讀取）</label>
+        <input id="csv-file" type="file" accept=".csv,text/csv" />
+        <p id="import-state" role="status">
+          載入後保留原始 ADC，依原順序重新計算 60 Hz
+          濾波；不採用檔內既有濾波值。USB 與示範停止後才能匯入。
+        </p>
+        <label for="history">CSV 檢視終點（秒）</label
+        ><input
+          id="history"
+          type="range"
+          min="0"
+          max="1"
+          value="1"
+          step="0.001"
+          disabled
+          style="width: 100%"
+        />
+        <output id="history-label" for="history">尚未載入</output>
       </section>
       <section class="panel help">
         <div>
           <h2>開始量測</h2>
           <ol>
             <li>
-              將
-              <a href="firmware/ECGSerial/ECGSerial.ino" download
-                >ECGSerial.ino</a
-              >
-              燒錄至 ESP32，保留原本 TFT 與 AD8232 接線。
+              沿用目前可正常運作的 ESP32 韌體、TFT 與 AD8232
+              接線，本版只更新網頁。
             </li>
             <li>以 USB 連接 ESP32，關閉 Arduino 序列監控視窗。</li>
             <li>選擇 115200，按「連接 ESP32」並選取序列埠。</li>
@@ -292,8 +338,8 @@
             為穩定中、2 為正常。取樣目標 250 Hz，實際速度可能受 TFT 繪圖影響。
           </p>
           <p>
-            示範資料由程式產生，與實際量測分開。CSV
-            匯出包含目前緩衝區的時間、ADC、狀態與來源，不會上傳資料。
+            示範資料由程式產生，與實際量測分開。CSV 匯出保留時間、原始
+            ADC、狀態與來源，另含濾波值、暖機、重設原因及濾波參數。獨立記錄不受即時緩衝淘汰影響。
           </p>
           <p>
             若無法連線，請確認 USB 資料線、驅動與序列埠使用權限；Safari、Firefox
@@ -303,6 +349,7 @@
       </section>
       <footer>ECG MONITOR · 本機處理 · 無外部服務依賴</footer>
     </main>
+    <script src="ecg-core.js"></script>
     <script>
       "use strict";
       const $ = (id) => document.getElementById(id);
@@ -311,7 +358,14 @@
         typeof navigator.serial.requestPort === "function";
       const MAX_SAMPLES = 15000,
         STATUS = ["電極脫落", "等待穩定", "接觸正常"];
-      let samples = [],
+      const live = new ECG.LiveBuffer(),
+        processor = new ECG.Processor(),
+        recorder = new ECG.Recorder();
+      let importedRows = null,
+        importing = false,
+        stalled = false,
+        frozenEnd = null;
+      let samples = live.items,
         total = 0,
         port = null,
         reader = null,
@@ -334,12 +388,22 @@
         $("message").classList.toggle("error", error);
       }
       function controls() {
-        const busy = !!port || connecting;
+        const busy = !!port || connecting || importing;
         $("connect").disabled =
           busy || !!demoTimer || !serialSupported || !isSecureContext;
         $("disconnect").disabled = !port || connecting || closing;
         $("baud").disabled = busy;
         $("demo").disabled = busy;
+        $("clear").disabled = importedRows !== null;
+        $("csv-file").disabled = busy || !!demoTimer || recorder.active;
+        $("record-start").disabled =
+          recorder.active ||
+          recorder.rows.length > 0 ||
+          !(port || demoTimer) ||
+          importedRows !== null;
+        $("record-stop").disabled = !recorder.active;
+        $("record-export").disabled = recorder.active || !recorder.rows.length;
+        $("record-discard").disabled = recorder.active || !recorder.rows.length;
         $("demo").textContent = demoTimer ? "停止示範" : "啟動示範";
         $("connection").textContent = port
           ? "● USB 已連線"
@@ -348,8 +412,20 @@
             : "● 尚未連線";
       }
       function reset() {
-        samples = [];
+        live.clear();
+        samples = live.items;
+        processor.reset("start");
+        stalled = false;
+        importedRows = null;
+        $("history").disabled = true;
+        $("history-label").textContent = "尚未載入";
+        $("filter-state").textContent = "等待資料";
+        $("saturation").textContent = "原始 ADC 保持不變；濾波無法修復截頂。";
         frozen = [];
+        frozenEnd = null;
+        paused = false;
+        $("pause").textContent = "暫停顯示";
+        $("pause").setAttribute("aria-pressed", "false");
         total = 0;
         deviceLast = null;
         deviceEpoch = 0;
@@ -396,35 +472,60 @@
           }
         };
       }
+      function recordUI() {
+        recorder.tick();
+        const rows = recorder.rows,
+          seconds = rows.length
+            ? (rows[rows.length - 1].time - rows[0].time) / 1000
+            : 0;
+        $("record-state").textContent =
+          `${recorder.reason} · ${rows.length.toLocaleString()} / 75,000 筆 · ${seconds.toFixed(3)} / 300 秒 · 來源 ${recorder.source || "—"}`;
+        controls();
+      }
       function accept(record) {
-        let { ms, adc, status } = record;
+        const { ms, adc, status } = record;
+        let restarted = false;
         if (deviceLast !== null && ms < deviceLast) {
           if (deviceLast > 0xf0000000 && ms < 0x0fffffff)
             deviceEpoch += 4294967296;
           else {
             deviceEpoch = lastTime + 4;
             deviceBase = ms;
+            restarted = true;
           }
         }
         if (deviceBase === null) deviceBase = ms;
         deviceLast = ms;
         const time = ms - deviceBase + deviceEpoch;
-        if (time <= lastTime) return;
         lastTime = time;
-        const now = performance.now();
-        lastArrival = now;
-        samples.push({ time, ms, adc, status, source: mode });
-        while (
-          samples.length &&
-          (samples.length > MAX_SAMPLES || time - samples[0].time > 60000)
-        )
-          samples.shift();
+        if (lastArrival && performance.now() - lastArrival > 2000 && !stalled)
+          processor.interrupt("transport-timeout");
+        lastArrival = performance.now();
+        stalled = false;
+        const sample = processor.process({
+          time,
+          ms,
+          adc,
+          status,
+          source: mode,
+          restarted,
+        });
+        live.push(sample);
+        samples = live.items;
+        const wasRecording = recorder.active;
+        recorder.append(sample);
         total++;
         rateCount++;
         $("count").textContent = total.toLocaleString();
         $("adc").textContent = status === 0 ? "—" : adc;
         $("contact").textContent = STATUS[status];
         $("export").disabled = false;
+        if (wasRecording && !recorder.active) recordUI();
+      }
+      function interrupt(reason) {
+        processor.interrupt(reason);
+        recorder.stop("連線或來源停止，自動停止");
+        recordUI();
       }
       async function readLoop(activePort) {
         const decoder = new TextDecoder();
@@ -456,6 +557,7 @@
           } catch (error) {
             message("序列埠關閉失敗：" + error.message, true);
           }
+          interrupt("disconnect");
           if (port === activePort) port = null;
           closing = false;
           $("source").textContent = "USB 已中斷 · 保留最後接收資料";
@@ -507,6 +609,7 @@
         if (demoTimer) {
           clearInterval(demoTimer);
           demoTimer = null;
+          interrupt("demo-stop");
           $("source").textContent = "示範已停止 · 非實際量測";
           message("示範已停止。");
         } else {
@@ -535,34 +638,115 @@
       };
       $("pause").onclick = () => {
         paused = !paused;
-        frozen = paused ? samples.slice() : [];
+        frozen = paused ? (importedRows || samples).slice() : [];
+        frozenEnd = paused ? displayEnd(frozen) : null;
         $("pause").textContent = paused ? "繼續顯示" : "暫停顯示";
         $("pause").setAttribute("aria-pressed", String(paused));
       };
-      $("clear").onclick = reset;
-      $("export").onclick = () => {
-        const csv =
-          "time_ms,device_ms,adc,status,source\n" +
-          samples
-            .map((s) => [s.time, s.ms, s.adc, s.status, s.source].join(","))
-            .join("\n");
+      $("clear").onclick = () => {
+        live.clear();
+        samples = live.items;
+        frozen = [];
+        $("export").disabled = true;
+        message("即時緩衝已清空；裝置時間、濾波與獨立記錄持續。");
+      };
+      function download(rows, kind) {
         const url = URL.createObjectURL(
-          new Blob([csv], { type: "text/csv;charset=utf-8" }),
+          new Blob([ECG.toCSV(rows)], { type: "text/csv;charset=utf-8" }),
         );
         const a = document.createElement("a");
         a.href = url;
         a.download =
           "ecg-" +
-          mode +
+          (rows[0]?.source || mode) +
+          "-" +
+          kind +
           "-" +
           new Date().toISOString().replace(/[:.]/g, "-") +
           ".csv";
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      $("export").onclick = () => download(samples, "live");
+      $("record-start").onclick = () => {
+        if (recorder.start(mode)) recordUI();
       };
+      $("record-stop").onclick = () => {
+        recorder.stop();
+        recordUI();
+      };
+      $("record-export").onclick = () => download(recorder.rows, "recording");
+      $("record-discard").onclick = () => {
+        if (confirm("確定刪除已存紀錄？此動作無法復原，請先匯出。")) {
+          recorder.clear();
+          recordUI();
+        }
+      };
+      $("csv-file").onchange = async (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+        importing = true;
+        controls();
+        try {
+          if (file.size > 20 * 1024 * 1024)
+            throw new Error("CSV 超過 20 MiB，未載入");
+          const rows = ECG.parseCSV(await file.text());
+          reset();
+          processor.reset("csv-import");
+          importedRows = rows.map((row) => processor.process(row));
+          mode = rows[0].source;
+          for (const row of importedRows) live.push(row);
+          samples = live.items;
+          total = rows.length;
+          $("count").textContent = total.toLocaleString();
+          $("history").min = rows[0].time / 1000;
+          $("history").max = rows[rows.length - 1].time / 1000;
+          $("history").value = $("history").max;
+          $("history").disabled = false;
+          $("history-label").textContent =
+            "檢視終點 " + $("history").value + " 秒（CSV 原始 time_ms）";
+          $("source").textContent =
+            "本機 CSV · " + file.name + " · 原始來源 " + mode + " · 非即時接收";
+          $("export").disabled = false;
+          const last = rows[rows.length - 1];
+          $("adc").textContent = last.adc;
+          $("contact").textContent = STATUS[last.status];
+          $("import-state").textContent =
+            `已完整載入 ${rows.length.toLocaleString()} 筆；原始值不變，可切換波形或移動時間軸。既有獨立紀錄未變動。`;
+          message("CSV 僅在本機處理，未上傳。");
+        } catch (error) {
+          $("import-state").textContent = "載入失敗：" + error.message;
+        } finally {
+          importing = false;
+          event.target.value = "";
+          controls();
+        }
+      };
+      $("history").oninput = () => {
+        if (paused) $("pause").click();
+        $("history-label").textContent =
+          "檢視終點 " + $("history").value + " 秒（CSV 原始 time_ms）";
+      };
+      function displayEnd(data) {
+        return importedRows
+          ? Number($("history").value) * 1000
+          : data.length
+            ? data[data.length - 1].time
+            : 0;
+      }
       const canvas = $("wave"),
         ctx = canvas.getContext("2d");
       function draw() {
+        const targetHeight =
+          $("view").value === "compare"
+            ? innerWidth < 650
+              ? 540
+              : 620
+            : innerWidth < 650
+              ? 280
+              : 360;
+        if (canvas.style.height !== targetHeight + "px")
+          canvas.style.height = targetHeight + "px";
         const rect = canvas.getBoundingClientRect(),
           dpr = window.devicePixelRatio || 1;
         if (
@@ -576,61 +760,120 @@
         const w = rect.width,
           h = rect.height,
           left = 45,
-          right = w - 12,
-          top = 18,
-          bottom = h - 28;
+          right = w - 12;
         ctx.clearRect(0, 0, w, h);
         ctx.font = "11px system-ui";
-        ctx.fillStyle = "#91a6bd";
-        ctx.lineWidth = 1;
         const duration = Number($("window").value) * 1000;
-        for (let i = 0; i <= 4; i++) {
-          const y = top + ((bottom - top) * i) / 4;
-          ctx.strokeStyle = "#243449";
-          ctx.beginPath();
-          ctx.moveTo(left, y);
-          ctx.lineTo(right, y);
-          ctx.stroke();
-          ctx.fillText(String(Math.round(4095 * (1 - i / 4))), 4, y + 4);
-        }
-        for (let i = 0; i <= 10; i++) {
-          const x = left + ((right - left) * i) / 10;
-          ctx.strokeStyle = "#1c2a3d";
-          ctx.beginPath();
-          ctx.moveTo(x, top);
-          ctx.lineTo(x, bottom);
-          ctx.stroke();
-          if (i % 2 === 0)
-            ctx.fillText(
-              (((i / 10 - 1) * duration) / 1000).toFixed(0) + "s",
-              x - 9,
-              h - 8,
-            );
-        }
-        const data = paused ? frozen : samples,
-          end = data.length ? data[data.length - 1].time : 0,
+        const data = paused ? frozen : importedRows || samples,
+          end = paused ? frozenEnd : displayEnd(data),
           start = end - duration;
-        ctx.strokeStyle = "#54e2ad";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        let previous = null;
-        for (const s of data) {
-          if (s.time < start) continue;
-          if (s.status !== 2) {
-            previous = null;
-            continue;
+        const visible = data.filter((s) => s.time >= start && s.time <= end);
+        const view = $("view").value;
+        // Same time and fixed vertical scale in every panel, including notch overshoot.
+        const plots = view === "compare" ? ["raw", "filtered"] : [view];
+        const panelHeight = h / plots.length,
+          minADC = -512,
+          maxADC = 4607;
+        for (let panel = 0; panel < plots.length; panel++) {
+          const kind = plots[panel],
+            top = panel * panelHeight + 26,
+            bottom = (panel + 1) * panelHeight - 26;
+          ctx.fillStyle = kind === "raw" ? "#54e2ad" : "#83bcff";
+          ctx.fillText(
+            kind === "raw" ? "原始 ADC（未修改）" : "60 Hz notch · 黃色為暖機",
+            left,
+            top - 10,
+          );
+          ctx.lineWidth = 1;
+          ctx.fillStyle = "#91a6bd";
+          for (const value of [-512, 0, 2048, 4095, 4607]) {
+            const y =
+              bottom - ((value - minADC) / (maxADC - minADC)) * (bottom - top);
+            ctx.strokeStyle = "#243449";
+            ctx.beginPath();
+            ctx.moveTo(left, y);
+            ctx.lineTo(right, y);
+            ctx.stroke();
+            ctx.fillText(String(value), 4, y + 4);
           }
-          const x = left + ((s.time - start) / duration) * (right - left),
-            y = bottom - (s.adc / 4095) * (bottom - top);
-          if (!previous || s.time - previous.time > 100) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-          previous = s;
+          for (let i = 0; i <= 10; i++) {
+            const x = left + ((right - left) * i) / 10;
+            ctx.strokeStyle = "#1c2a3d";
+            ctx.beginPath();
+            ctx.moveTo(x, top);
+            ctx.lineTo(x, bottom);
+            ctx.stroke();
+            if (i % 2 === 0)
+              ctx.fillText(
+                ((end - duration + (i / 10) * duration) / 1000).toFixed(1) +
+                  "s",
+                x - 14,
+                bottom + 18,
+              );
+          }
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(left, top, right - left, bottom - top);
+          ctx.clip();
+          let previous = null;
+          for (const sample of visible) {
+            const value = kind === "raw" ? sample.adc : sample.filtered;
+            if (sample.status !== 2 || value === null) {
+              previous = null;
+              continue;
+            }
+            const x =
+                left + ((sample.time - start) / duration) * (right - left),
+              y =
+                bottom -
+                ((value - minADC) / (maxADC - minADC)) * (bottom - top);
+            ctx.strokeStyle =
+              kind === "filtered" && sample.warmup
+                ? "#e6bd70"
+                : kind === "raw"
+                  ? "#54e2ad"
+                  : "#83bcff";
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            if (
+              previous &&
+              sample.segment === previous.segment &&
+              sample.time - previous.time === 4
+            ) {
+              ctx.moveTo(previous.x, previous.y);
+              ctx.lineTo(x, y);
+            } else {
+              ctx.moveTo(x, y);
+              ctx.lineTo(x + 0.5, y);
+            }
+            ctx.stroke();
+            if (kind === "raw" && sample.saturated) {
+              ctx.fillStyle = "#ff9180";
+              ctx.fillRect(x - 2, y - 2, 4, 4);
+            }
+            previous = { ...sample, x, y };
+          }
+          ctx.restore();
         }
-        ctx.stroke();
+        const saturated = visible.filter(
+          (s) => s.status === 2 && s.saturated,
+        ).length;
+        const invalidSaturated = visible.filter(
+          (s) => s.status !== 2 && s.saturated,
+        ).length;
+        $("saturation").textContent =
+          `此時間窗：正常狀態 ADC＝0/4095 共 ${saturated} 筆，可能飽和；無效狀態端點值 ${invalidSaturated} 筆另計。原始值保留，濾波無法修復截頂。`;
+        const latest = visible[visible.length - 1],
+          warming = visible.filter((s) => s.warmup).length;
+        $("filter-state").textContent = stalled
+          ? "資料中斷，濾波狀態已重設；恢復後重新暖機"
+          : latest
+            ? `${latest.status !== 2 ? "電極狀態無效，濾波已重設" : latest.warmup ? "濾波暖機中（約 1 秒）" : "濾波運作中"} · 時間窗含 ${warming} 筆暖機資料（黃色） · 缺口不插值、不跨段連線`
+            : "等待資料";
         if (!data.length) {
           ctx.fillStyle = "#91a6bd";
           ctx.textAlign = "center";
-          ctx.fillText("連接 ESP32 或啟動示範以查看波形", w / 2, h / 2);
+          ctx.fillText("連接 ESP32、啟動示範或載入 CSV", w / 2, h / 2);
           ctx.textAlign = "start";
         }
         requestAnimationFrame(draw);
@@ -644,7 +887,14 @@
             : "0";
         rateCount = 0;
         rateStart = now;
+        if (recorder.active) recordUI();
         if ((port || demoTimer) && lastArrival && now - lastArrival > 2000) {
+          if (!stalled) {
+            processor.interrupt("transport-timeout");
+            stalled = true;
+          }
+          $("filter-state").textContent =
+            "資料中斷，濾波狀態已重設；恢復後重新暖機";
           $("contact").textContent = "資料中斷";
           $("adc").textContent = "—";
         }
@@ -656,7 +906,13 @@
           "此瀏覽器不支援 Web Serial，請改用電腦版 Chrome 或 Edge；仍可啟動示範。",
           true,
         );
-      controls();
+      window.addEventListener("beforeunload", (event) => {
+        if (recorder.rows.length || recorder.active) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      });
+      recordUI();
       draw();
     </script>
   </body>

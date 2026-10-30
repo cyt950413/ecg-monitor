@@ -42,8 +42,14 @@ const path = require("node:path");
   });
   await page.route("https://localhost/**", (route) =>
     route.fulfill({
-      path: path.resolve("index.html"),
-      contentType: "text/html",
+      path: path.resolve(
+        new URL(route.request().url()).pathname.endsWith("ecg-core.js")
+          ? "ecg-core.js"
+          : "index.html",
+      ),
+      contentType: new URL(route.request().url()).pathname.endsWith(".js")
+        ? "application/javascript"
+        : "text/html",
     }),
   );
   await page.goto("https://localhost/");
@@ -78,7 +84,7 @@ const path = require("node:path");
   assert.equal(await page.evaluate(() => samples[0].source), "demo");
   await page.click("#demo");
   await page.click("#clear");
-  assert.equal(await page.locator("#count").innerText(), "0");
+  assert.equal(await page.evaluate(() => samples.length), 0);
   await page.evaluate(() => {
     reset();
     mode = "usb";
@@ -128,8 +134,14 @@ const path = require("node:path");
 
   await unsupported.route("https://localhost/**", (route) =>
     route.fulfill({
-      path: path.resolve("index.html"),
-      contentType: "text/html",
+      path: path.resolve(
+        new URL(route.request().url()).pathname.endsWith("ecg-core.js")
+          ? "ecg-core.js"
+          : "index.html",
+      ),
+      contentType: new URL(route.request().url()).pathname.endsWith(".js")
+        ? "application/javascript"
+        : "text/html",
     }),
   );
   await unsupported.goto("https://localhost/");

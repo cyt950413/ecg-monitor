@@ -1,0 +1,39 @@
+{
+  "sha256": "e9d0e490eab5eb09d03938f19c79e8715a44d31e66bb25ced481f40087d5d468",
+  "rows": 14997,
+  "durationSeconds": 60,
+  "averageHz": 249.93333333333334,
+  "states": {
+    "0": 0,
+    "1": 559,
+    "2": 14438
+  },
+  "intervalsMs": {
+    "4": 14995,
+    "20": 1
+  },
+  "normalADC0": 0,
+  "normalADC4095": 19,
+  "rawPreserved": true,
+  "filter": {
+    "fs": 250,
+    "hz": 60,
+    "q": 30,
+    "warmupSamples": 250,
+    "version": "iirnotch-v1"
+  },
+  "welch": {
+    "window": "Hann symmetric, per-window mean removed",
+    "n": 1024,
+    "hop": 512,
+    "windows": 26,
+    "dfHz": 0.244140625,
+    "excluded": "status != 2, first 250 samples after every reset, windows crossing gaps",
+    "peakHz": 60.05859375,
+    "rawBand58to62ADC2": 55248.45667304384,
+    "filteredBand58to62ADC2": 108.33217327459732,
+    "powerRatioDb": -27.075626951071364,
+    "rawBand5to40ADC2": 48745.65039759786,
+    "filteredBand5to40ADC2": 48739.97823005236
+  }
+}
