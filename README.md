@@ -88,9 +88,9 @@ node tests/analyze-csv.cjs path/to/your.csv /tmp/ecg-analysis
 
 ## 這次附件的結果與測試
 
-實際附件與需求文字的統計不一致：讀到 **14,873 筆、59.997 秒、平均 247.879 Hz**，正常狀態有 **271 筆 ADC＝0、0 筆 ADC＝4095**，有 **31 個 19–22 ms 間隔**。測試以實際檔案為準，SHA-256 見 [測試紀錄](TEST_RESULTS.md)。
+已改用最新附件 `ecg-usb-2026-10-29T15-48-05-647Z.csv`：**14,997 筆、60 秒、平均 249.933 Hz**，正常狀態有 **0 筆 ADC＝0、19 筆 ADC＝4095**，只有 **1 個 20 ms 間隔**，其餘為 4 ms。這份附件符合最初提供的統計，SHA-256 見 [測試紀錄](TEST_RESULTS.md)。
 
-相同樣本的 58–62 Hz 頻帶功率由 **1618.6024 降為 10.6926 ADC²（−21.80 dB）**；5–40 Hz 功率由 **138416.0532 降為 138365.8695 ADC²**。原始主峰位於 60.0586 Hz 頻率格點。這是這份資料、這些穩態區段的結果，不代表所有 60 Hz 干擾都會消失，也不代表飽和、接觸或雜訊問題已解決。未將原始 CSV 加入儲存庫。
+相同樣本的 58–62 Hz 頻帶功率由 **55248.4567 降為 108.3322 ADC²（−27.08 dB）**；5–40 Hz 功率由 **48745.6504 降為 48739.9782 ADC²**。原始主峰位於 60.0586 Hz 頻率格點。這是這份資料、這些穩態區段的結果，不代表所有 60 Hz 干擾都會消失，也不代表飽和、接觸或雜訊問題已解決。未將原始 CSV 加入儲存庫。
 
 ![實測 CSV 濾波前後的頻譜比較](reports/csv-spectrum.svg)
 
@@ -103,7 +103,7 @@ npm install --no-save --package-lock=false playwright@1.62.1
 node tests/browser.cjs
 node tests/notch-browser.cjs
 # 可選：附上自己的檔案，同時測試實測 CSV 匯入
-node tests/notch-browser.cjs path/to/ecg-usb-2026-10-29T15-16-50-546Z.csv
+node tests/notch-browser.cjs path/to/ecg-usb-2026-10-29T15-48-05-647Z.csv
 # Chromium 不在 /usr/bin/chromium 時，設定 CHROMIUM_PATH
 # 可選獨立科學計算參考驗證，需要 NumPy / SciPy
 python3 tests/scipy-reference.py

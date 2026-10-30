@@ -155,13 +155,14 @@ const { chromium } = require("playwright"),
     if (process.argv[2]) {
       await page.setInputFiles("#csv-file", process.argv[2]);
       await page.waitForFunction(() => importedRows !== null);
-      assert.equal(await page.evaluate(() => importedRows.length), 14873);
-      assert.equal(
-        await page.evaluate(
-          () =>
-            importedRows.filter((s) => s.status === 2 && s.adc === 0).length,
+      const expected = require("../ecg-core.js").parseCSV(
+        fs.readFileSync(process.argv[2], "utf8"),
+      );
+      assert.deepEqual(
+        await page.evaluate(() =>
+          importedRows.map((s) => [s.time, s.ms, s.adc, s.status, s.source]),
         ),
-        271,
+        expected.map((s) => [s.time, s.ms, s.adc, s.status, s.source]),
       );
       await page.setViewportSize({ width: 1200, height: 1000 });
       await page.screenshot({
