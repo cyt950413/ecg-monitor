@@ -150,3 +150,78 @@ assert.equal(duplicates[1].resetReason, "time-gap");
 console.log(
   "PASS: resets, 250-sample warmup, unchanged raw ADC, stopped recording immutable, 5-minute/75k caps, source isolation, CSV roundtrip, live buffer eviction",
 );
+
+// ---- Monitoring band (0.5–40 Hz + 60 Hz notch) ----
+const { MonitorFilter, zeroPhase, MONITOR } = ECG;
+function toneGain(hz) {
+  const f = new MonitorFilter(),
+    x = [],
+    y = [];
+  for (let i = 0; i < 20000; i++) {
+    const v = 2000 + 300 * Math.sin((2 * Math.PI * hz * i) / MONITOR.fs);
+    const out = f.next(v);
+    if (i >= 5000) {
+      x.push(v - 2000);
+      y.push(out);
+    }
+  }
+  return amplitude(y, hz) / amplitude(x, hz);
+}
+const g = {
+  0.1: toneGain(0.1),
+  1: toneGain(1),
+  10: toneGain(10),
+  40: toneGain(40),
+  60: toneGain(60),
+  100: toneGain(100),
+};
+assert.ok(g[0.1] < 0.05, "baseline wander removed");
+assert.ok(g[1] > 0.95 && g[10] > 0.95 && g[10] < 1.01, "ECG band kept");
+assert.ok(Math.abs(20 * Math.log10(g[40]) + 3.01) < 0.1, "-3 dB at 40 Hz");
+assert.ok(g[60] < 1e-3 && g[100] < 0.05, "mains and HF removed");
+console.log(
+  "Monitor band gains: " +
+    Object.entries(g)
+      .map(([k, v]) => `${k} Hz ${(20 * Math.log10(v)).toFixed(2)} dB`)
+      .join(", "),
+);
+// Constant input: no start-up step, output centred on 0.
+const flat = new MonitorFilter();
+for (let i = 0; i < 10; i++) assert.ok(Math.abs(flat.next(2048)) < 1e-9);
+// Processor carries monitor channel, reset with notch, null when invalid.
+const mp = new Processor();
+let m = mp.process({ time: 0, ms: 0, adc: 2048, status: 2, source: "usb" });
+assert.ok(Math.abs(m.monitor) < 1e-9);
+m = mp.process({ time: 4, ms: 4, adc: 2048, status: 0, source: "usb" });
+assert.equal(m.monitor, null);
+// Zero-phase: a symmetric pulse stays symmetric about its peak (no phase lag).
+const pulseRows = [];
+const zp = new Processor();
+for (let i = 0; i < 2500; i++) {
+  const t = (i - 1250) / 250;
+  pulseRows.push(
+    zp.process({
+      time: i * 4,
+      ms: i * 4,
+      adc: Math.round(2048 + 400 * Math.exp(-((t / 0.04) ** 2))),
+      status: 2,
+      source: "usb",
+    }),
+  );
+}
+const zrows = zeroPhase(pulseRows);
+const peak = zrows.reduce((b, s, i) => (s.monitor > zrows[b].monitor ? i : b), 0);
+const causalPeak = pulseRows.reduce(
+  (b, s, i) => (s.monitor > pulseRows[b].monitor ? i : b),
+  0,
+);
+assert.equal(peak, 1250, "zero-phase peak not shifted");
+assert.ok(causalPeak > 1250, "causal filter delays the peak");
+for (let k = 1; k < 40; k++)
+  assert.ok(Math.abs(zrows[1250 - k].monitor - zrows[1250 + k].monitor) < 0.5);
+assert.equal(Object.isFrozen(zrows[0]), true);
+assert.equal(pulseRows[1250].zeroPhase, false);
+assert.ok(toCSV(zrows).split("\n")[0].endsWith("monitor_adc,monitor_zero_phase,monitor_version"));
+console.log(
+  `PASS: monitor band, no start-up step, zero-phase peak at ${peak} (causal ${causalPeak}), CSV monitor columns`,
+);

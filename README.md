@@ -1,6 +1,28 @@
 # ECG Monitor
 
-ESP32 + AD8232 的 USB 心電波形介面。資料只在本機瀏覽器處理，沒有 CDN、後端或上傳功能。這次只更新網頁：**硬體腳位、USB 格式與 `firmware/ECGSerial/ECGSerial.ino` 完全不變**，不必重新燒錄。
+ESP32 + AD8232 的 USB 心電波形介面。資料只在本機瀏覽器處理，沒有 CDN、後端或上傳功能。
+
+## 監護濾波與 1 kHz 韌體（feat/monitor-filter-1khz）
+
+**需要重新燒錄韌體。** 硬體腳位與 USB 格式（`timestamp_ms,raw_adc,status`，250 Hz、間隔 4 ms）不變，舊版網頁也能讀。
+
+韌體 `firmware/ECGSerial/ECGSerial.ino`：
+
+- 取樣改由 FreeRTOS 工作（core 0）每 1 ms 執行，每次連讀 ADC 4 次；每 4 ms 把 16 次讀值平均成一筆輸出。TFT 繪圖在 core 1，不再影響取樣時間；時間戳由 tick 決定，固定相差 4 ms。
+- 4 點平均在 250/500 Hz 有零點，能壓低會混疊回 0–40 Hz 的高頻雜訊，也降低 ESP32 ADC 本身的雜訊。
+- 4 ms 內任何一次讀值碰到 0/4095 就輸出 0/4095，網頁照樣標示飽和；TFT 右上角顯示 `CLIP!`。
+- TFT 顯示 0.5–40 Hz + 60 Hz notch 濾波後的 mV 波形：25 mm/s、20 mm/mV（×2 增益），格線 5 mm。增益常數 `AD8232_GAIN`、`DIVIDER_RATIO` 請依模組修改。
+
+網頁：
+
+- 新增預設顯示「心電圖紙」：0.5 Hz 高通（二階 Butterworth）→ 60 Hz notch → 40 Hz 低通（二階 Butterworth），換算 mV，25 mm/s、10 mm/mV，1 mV 校正方波，導程標示。係數與 `scipy.signal.butter(2, …)`、`iirnotch` 相同（`tests/scipy-reference.py`）。
+- 即時資料用因果濾波；載入 CSV 時在每個連續區段內做前後雙向（零相位）濾波，不移動 P/QRS/T 的位置與形狀。
+- CSV 匯出新增 `monitor_adc,monitor_zero_phase,monitor_version` 欄位；原有欄位、原始 ADC 與 notch 檢視不變。
+- mV 換算：`mV = (濾波後 ADC 差值) × 3300 / 4095 / 增益`。ESP32 ADC 非線性，數值為近似；要準確請以 ECG 模擬器的 1 mV 訊號校正增益欄位。
+
+測試：`node tests/core.cjs`、`python3 tests/scipy-reference.py`、`g++ -std=c++17 -Itests/arduino-stubs -x c++ tests/firmware.cpp && ./a.out`、兩個瀏覽器測試。韌體只在電腦端以 stub 編譯測試，尚未用 ESP32 工具鏈編譯，請在 Arduino IDE 編譯確認。
+
+以下為前一版（notch 與記錄功能）的說明。
 
 ## 合併與更新網站
 
