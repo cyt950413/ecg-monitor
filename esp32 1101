@@ -1,0 +1,1304 @@
+From 1bfcbb5a7e5bf45e27809fa358aa56c09b57b0e3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 1 Nov 2026 13:27:15 +0800
+Subject: [PATCH] Monitor-band ECG paper view and 1 kHz decimated firmware
+ sampling
+
+- Firmware: FreeRTOS sampler at 1 kHz (4-read bursts), 4x average to 250 Hz,
+  sticky saturation, exact 4 ms timestamps; TFT shows 0.5-40 Hz + 60 Hz notch
+  filtered mV trace at 25 mm/s, 20 mm/mV with CLIP indicator. USB format unchanged.
+- Web: 0.5 Hz HP / 60 Hz notch / 40 Hz LP monitor chain (matches scipy),
+  ECG paper view (25 mm/s, 10 mm/mV, 1 mV calibration pulse, lead label, gain),
+  zero-phase filtering for imported CSV, monitor columns in CSV export.
+- Tests for filter response, scipy equivalence, zero-phase symmetry, firmware
+  decimation/saturation/ring buffer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011EXM6d2z4xUh4jWhGSihov
+---
+ README.md                        |  24 +-
+ ecg-core.js                      | 142 ++++++++-
+ firmware/ECGSerial/ECGSerial.ino | 483 ++++++++++++++++++++++---------
+ index.html                       | 181 +++++++++++-
+ tests/core.cjs                   |  75 +++++
+ tests/firmware.cpp               |  91 +++++-
+ tests/scipy-reference.py         |  16 +
+ 7 files changed, 851 insertions(+), 161 deletions(-)
+
+diff --git a/README.md b/README.md
+index e8bbb97..295d277 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,28 @@
+ # ECG Monitor
+ 
+-ESP32 + AD8232 的 USB 心電波形介面。資料只在本機瀏覽器處理，沒有 CDN、後端或上傳功能。這次只更新網頁：**硬體腳位、USB 格式與 `firmware/ECGSerial/ECGSerial.ino` 完全不變**，不必重新燒錄。
++ESP32 + AD8232 的 USB 心電波形介面。資料只在本機瀏覽器處理，沒有 CDN、後端或上傳功能。
++
++## 監護濾波與 1 kHz 韌體（feat/monitor-filter-1khz）
++
++**需要重新燒錄韌體。** 硬體腳位與 USB 格式（`timestamp_ms,raw_adc,status`，250 Hz、間隔 4 ms）不變，舊版網頁也能讀。
++
++韌體 `firmware/ECGSerial/ECGSerial.ino`：
++
++- 取樣改由 FreeRTOS 工作（core 0）每 1 ms 執行，每次連讀 ADC 4 次；每 4 ms 把 16 次讀值平均成一筆輸出。TFT 繪圖在 core 1，不再影響取樣時間；時間戳由 tick 決定，固定相差 4 ms。
++- 4 點平均在 250/500 Hz 有零點，能壓低會混疊回 0–40 Hz 的高頻雜訊，也降低 ESP32 ADC 本身的雜訊。
++- 4 ms 內任何一次讀值碰到 0/4095 就輸出 0/4095，網頁照樣標示飽和；TFT 右上角顯示 `CLIP!`。
++- TFT 顯示 0.5–40 Hz + 60 Hz notch 濾波後的 mV 波形：25 mm/s、20 mm/mV（×2 增益），格線 5 mm。增益常數 `AD8232_GAIN`、`DIVIDER_RATIO` 請依模組修改。
++
++網頁：
++
++- 新增預設顯示「心電圖紙」：0.5 Hz 高通（二階 Butterworth）→ 60 Hz notch → 40 Hz 低通（二階 Butterworth），換算 mV，25 mm/s、10 mm/mV，1 mV 校正方波，導程標示。係數與 `scipy.signal.butter(2, …)`、`iirnotch` 相同（`tests/scipy-reference.py`）。
++- 即時資料用因果濾波；載入 CSV 時在每個連續區段內做前後雙向（零相位）濾波，不移動 P/QRS/T 的位置與形狀。
++- CSV 匯出新增 `monitor_adc,monitor_zero_phase,monitor_version` 欄位；原有欄位、原始 ADC 與 notch 檢視不變。
++- mV 換算：`mV = (濾波後 ADC 差值) × 3300 / 4095 / 增益`。ESP32 ADC 非線性，數值為近似；要準確請以 ECG 模擬器的 1 mV 訊號校正增益欄位。
++
++測試：`node tests/core.cjs`、`python3 tests/scipy-reference.py`、`g++ -std=c++17 -Itests/arduino-stubs -x c++ tests/firmware.cpp && ./a.out`、兩個瀏覽器測試。韌體只在電腦端以 stub 編譯測試，尚未用 ESP32 工具鏈編譯，請在 Arduino IDE 編譯確認。
++
++以下為前一版（notch 與記錄功能）的說明。
+ 
+ ## 合併與更新網站
+ 
+diff --git a/ecg-core.js b/ecg-core.js
+index b97f947..a3858e7 100644
+--- a/ecg-core.js
++++ b/ecg-core.js
+@@ -46,19 +46,137 @@
+       return y;
+     }
+   }
++  // Monitoring-mode ECG band (IEC 60601-2-27 style): 0.5 Hz high-pass removes
++  // baseline wander, 40 Hz low-pass removes EMG / residual high-frequency noise,
++  // 60 Hz notch removes mains. Same coefficients as the ESP32 TFT firmware and
++  // scipy.signal.butter(2, fc, fs=250) / iirnotch(60, 30, fs=250).
++  const MONITOR = Object.freeze({
++    fs: 250,
++    highpassHz: 0.5,
++    lowpassHz: 40,
++    notchHz: 60,
++    notchQ: 30,
++    version: "monitor-0.5-40-v1",
++  });
++  class Biquad {
++    constructor(b0, b1, b2, a1, a2) {
++      Object.assign(this, { b0, b1, b2, a1, a2 });
++      this.x1 = this.x2 = this.y1 = this.y2 = 0;
++    }
++    // Steady state for a constant input x (avoids a fictitious start-up step).
++    prime(x) {
++      const y =
++        (x * (this.b0 + this.b1 + this.b2)) / (1 + this.a1 + this.a2);
++      this.x1 = this.x2 = x;
++      this.y1 = this.y2 = y;
++      return y;
++    }
++    next(x) {
++      const y =
++        this.b0 * x +
++        this.b1 * this.x1 +
++        this.b2 * this.x2 -
++        this.a1 * this.y1 -
++        this.a2 * this.y2;
++      this.x2 = this.x1;
++      this.x1 = x;
++      this.y2 = this.y1;
++      this.y1 = y;
++      return y;
++    }
++  }
++  function butter2(type, fc, fs) {
++    const w = (2 * Math.PI * fc) / fs,
++      c = Math.cos(w),
++      alpha = Math.sin(w) / Math.SQRT2, // Q = 1/sqrt(2)
++      a0 = 1 + alpha,
++      k = type === "low" ? (1 - c) / 2 : (1 + c) / 2;
++    return new Biquad(
++      k / a0,
++      (type === "low" ? 2 * k : -2 * k) / a0,
++      k / a0,
++      (-2 * c) / a0,
++      (1 - alpha) / a0,
++    );
++  }
++  function notch2(f0, q, fs) {
++    const w = (2 * Math.PI * f0) / fs,
++      alpha = Math.tan(w / (2 * q)),
++      b0 = 1 / (1 + alpha),
++      b1 = (-2 * Math.cos(w)) / (1 + alpha);
++    return new Biquad(b0, b1, b0, b1, (1 - alpha) / (1 + alpha));
++  }
++  // Output is centred on 0 (ADC counts relative to baseline).
++  class MonitorFilter {
++    constructor() {
++      this.reset();
++    }
++    reset() {
++      this.stages = [
++        butter2("high", MONITOR.highpassHz, MONITOR.fs),
++        notch2(MONITOR.notchHz, MONITOR.notchQ, MONITOR.fs),
++        butter2("low", MONITOR.lowpassHz, MONITOR.fs),
++      ];
++      this.count = 0;
++    }
++    next(x) {
++      if (!this.count) {
++        let v = x;
++        for (const stage of this.stages) v = stage.prime(v);
++      }
++      this.count++;
++      let y = x;
++      for (const stage of this.stages) y = stage.next(y);
++      return y;
++    }
++  }
++  // Forward-backward (filtfilt-style) pass for stored data: zero phase, so
++  // P/QRS/T shapes and timing are not distorted by the causal filter.
++  // Runs separately inside every continuous valid segment; never crosses gaps.
++  function zeroPhase(rows) {
++    const out = rows.map((s) => ({ ...s, monitor: null, zeroPhase: false }));
++    let i = 0;
++    while (i < rows.length) {
++      if (rows[i].status !== 2) {
++        i++;
++        continue;
++      }
++      let j = i + 1;
++      while (
++        j < rows.length &&
++        rows[j].status === 2 &&
++        rows[j].segment === rows[i].segment
++      )
++        j++;
++      const forward = new MonitorFilter(),
++        backward = new MonitorFilter(),
++        y = [];
++      for (let k = i; k < j; k++) y.push(forward.next(rows[k].adc));
++      for (let k = y.length - 1; k >= 0; k--) y[k] = backward.next(y[k]);
++      for (let k = i; k < j; k++) {
++        out[k].monitor = y[k - i];
++        out[k].zeroPhase = true;
++      }
++      i = j;
++    }
++    return out.map((s) => Object.freeze(s));
++  }
+   class Processor {
+     constructor() {
+       this.notch = new Notch();
++      this.monitor = new MonitorFilter();
+       this.reset("start");
+     }
+     reset(reason = "reset") {
+       this.notch.reset();
++      this.monitor.reset();
+       this.last = null;
+       this.pendingReason = reason;
+       this.segment = 0;
+     }
+     interrupt(reason = "interruption") {
+       this.notch.reset();
++      this.monitor.reset();
+       this.pendingReason = reason;
+       this.segment++;
+     }
+@@ -79,9 +197,12 @@
+       if (s.status !== 2) reason = "invalid-contact";
+       if (reason) {
+         this.notch.reset();
++        this.monitor.reset();
+         this.segment++;
+       }
+       s.filtered = s.status === 2 ? this.notch.next(s.adc) : null;
++      s.monitor = s.status === 2 ? this.monitor.next(s.adc) : null;
++      s.zeroPhase = false;
+       s.warmup = s.status === 2 && this.notch.count <= FILTER.warmupSamples;
+       s.saturated = s.adc === 0 || s.adc === 4095;
+       s.resetReason = reason || "";
+@@ -162,7 +283,7 @@
+   }
+   function toCSV(rows) {
+     const header =
+-      "time_ms,device_ms,adc,status,source,filtered_adc,filter_warmup,saturated,filter_reset,segment,filter_fs_hz,filter_center_hz,filter_q,filter_version";
++      "time_ms,device_ms,adc,status,source,filtered_adc,filter_warmup,saturated,filter_reset,segment,filter_fs_hz,filter_center_hz,filter_q,filter_version,monitor_adc,monitor_zero_phase,monitor_version";
+     return (
+       header +
+       "\n" +
+@@ -183,6 +304,9 @@
+             FILTER.hz,
+             FILTER.q,
+             FILTER.version,
++            s.monitor === null || s.monitor === undefined ? "" : s.monitor,
++            s.zeroPhase ? 1 : 0,
++            MONITOR.version,
+           ].join(","),
+         )
+         .join("\n")
+@@ -248,5 +372,19 @@
+       throw new Error("CSV 時間倒退；未載入，請檢查原始檔");
+     return rows;
+   }
+-  return { FILTER, Notch, Processor, LiveBuffer, Recorder, toCSV, parseCSV };
++  return {
++    FILTER,
++    MONITOR,
++    Notch,
++    Biquad,
++    butter2,
++    notch2,
++    MonitorFilter,
++    zeroPhase,
++    Processor,
++    LiveBuffer,
++    Recorder,
++    toCSV,
++    parseCSV,
++  };
+ });
+diff --git a/firmware/ECGSerial/ECGSerial.ino b/firmware/ECGSerial/ECGSerial.ino
+index c33c616..c56d338 100644
+--- a/firmware/ECGSerial/ECGSerial.ino
++++ b/firmware/ECGSerial/ECGSerial.ino
+@@ -1,6 +1,23 @@
+ #include <SPI.h>
+ #include <Adafruit_GFX.h>
+ #include <Adafruit_ILI9341.h>
++#include <atomic>
++#include <math.h>
++
++// =====================================================================
++// ESP32 + AD8232 心電：1 kHz 取樣 → 平均降頻 250 Hz → USB 輸出 + TFT 顯示
++//
++// 與上一版的差別：
++//  1. 取樣改由獨立 FreeRTOS 工作（core 0）每 1 ms 執行，TFT 繪圖不會再拖慢或
++//     打亂取樣時間。每 1 ms 連讀 ADC 4 次平均，再把 4 個 1 ms 結果平均成一筆
++//     250 Hz 輸出（共 16 次讀值）。4 點平均在 250、500 Hz 有零點，能壓低
++//     會「混疊」回 0–40 Hz 的高頻雜訊，也降低 ESP32 ADC 自身雜訊。
++//  2. 只要 4 ms 內任何一次讀值碰到 0 或 4095，輸出就保留 0/4095，
++//     網頁仍能標示「可能飽和」，不會被平均藏起來。
++//  3. USB 格式完全不變：timestamp_ms,raw_adc,status，間隔固定 4 ms。
++//  4. TFT 改畫「監護濾波」波形：0.5 Hz 高通 + 60 Hz notch + 40 Hz 低通，
++//     換算成 mV，固定比例 25 mm/s、20 mm/mV（心電圖機的 ×2 增益檔）。
++// =====================================================================
+ 
+ // ===== 螢幕接腳：沿用原本成功的接線 =====
+ constexpr int TFT_CS   = 27;
+@@ -16,86 +33,287 @@ constexpr int LO_MINUS_PIN = 14;
+ 
+ Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
+ 
++// ===== 取樣設定 =====
++constexpr int ADC_BURST = 4;      // 每 1 ms 連讀次數
++constexpr int DECIMATE  = 4;      // 每 4 個 1 ms 合成一筆 → 250 Hz
++constexpr double OUTPUT_FS = 250.0;
++
++// ===== 類比換算（請依你的模組修改）=====
++// SparkFun 型 AD8232 模組總增益約 1100 倍（1 mV 心電 → 約 1.1 V）。
++// 若在 AD8232 OUTPUT 與 GPIO34 之間加 1:2 分壓（例如 10k/10k），
++// 把 DIVIDER_RATIO 改成 0.5；網頁的「增益」欄位也要填 550。
++constexpr double AD8232_GAIN       = 1100.0;
++constexpr double DIVIDER_RATIO     = 1.0;
++constexpr double ADC_FULL_SCALE_MV = 3300.0;  // 近似值；ESP32 ADC 本身非線性
++constexpr double COUNTS_PER_MV =
++  AD8232_GAIN * DIVIDER_RATIO * 4095.0 / ADC_FULL_SCALE_MV;
++
+ // ===== 波形顯示區 =====
+ constexpr int GRAPH_LEFT   = 10;
+ constexpr int GRAPH_RIGHT  = 309;
+ constexpr int GRAPH_TOP    = 65;
+ constexpr int GRAPH_BOTTOM = 219;
+ 
+-constexpr uint16_t GRID_COLOR = 0x2104;
++// 每 5 筆（20 ms）畫一欄 → 50 欄/秒。把 2 px 當 1 mm：50 px/s = 25 mm/s。
++// 20 mm/mV = 40 px/mV。0 mV 基線放在偏下方，可顯示約 −1.3 ~ +2.5 mV。
++constexpr int SAMPLES_PER_COLUMN = 5;
++constexpr double TFT_PX_PER_MV = 40.0;
++constexpr int BASELINE_Y = GRAPH_BOTTOM - 54;
++constexpr int GRID_STEP = 10;     // 10 px = 5 mm 大格（0.2 s / 0.25 mV）
+ 
+-// 目標每 4000 微秒取樣一次，約 250 Hz。
+-// 本版為入門顯示程式，繪圖仍可能造成取樣延遲。
+-constexpr uint32_t SAMPLE_INTERVAL_US = 4000;
++constexpr uint16_t GRID_COLOR  = 0x2104;
++constexpr uint16_t GRID_MAJOR  = 0x4208;
+ 
+-// 每 5 筆資料畫一欄，約每秒向右前進 50 欄。
+-// 保留這 5 筆中的最大值、最小值，避免只抽一筆漏掉尖峰。
+-constexpr int SAMPLES_PER_COLUMN = 5;
++// 狀態代碼
++constexpr int STATUS_OFF  = 0;
++constexpr int STATUS_WAIT = 1;
++constexpr int STATUS_RUN  = 2;
+ 
+-uint32_t nextSampleUs = 0;
+-uint32_t contactStartMs = 0;
++// ---------------------------------------------------------------------
++// 二階 IIR（Direct Form I，double 精度）。係數與網頁 ecg-core.js、
++// scipy.signal.butter(2, …) / iirnotch 相同。
++// ---------------------------------------------------------------------
++struct Biquad {
++  double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
++  double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
++
++  double process(double x) {
++    double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
++    x2 = x1; x1 = x;
++    y2 = y1; y1 = y;
++    return y;
++  }
++
++  // 以「輸入一直是 x」的穩態初始化，避免開頭出現假的大跳動。
++  double prime(double x) {
++    double dcGain = (b0 + b1 + b2) / (1.0 + a1 + a2);
++    double y = x * dcGain;
++    x1 = x2 = x;
++    y1 = y2 = y;
++    return y;
++  }
++};
++
++Biquad makeLowpass(double fc, double fs) {
++  const double w = 2.0 * M_PI * fc / fs, c = cos(w);
++  const double alpha = sin(w) / (2.0 * M_SQRT1_2), a0 = 1.0 + alpha;
++  Biquad f;
++  f.b0 = (1.0 - c) / 2.0 / a0;
++  f.b1 = (1.0 - c) / a0;
++  f.b2 = f.b0;
++  f.a1 = -2.0 * c / a0;
++  f.a2 = (1.0 - alpha) / a0;
++  return f;
++}
++
++Biquad makeHighpass(double fc, double fs) {
++  const double w = 2.0 * M_PI * fc / fs, c = cos(w);
++  const double alpha = sin(w) / (2.0 * M_SQRT1_2), a0 = 1.0 + alpha;
++  Biquad f;
++  f.b0 = (1.0 + c) / 2.0 / a0;
++  f.b1 = -(1.0 + c) / a0;
++  f.b2 = f.b0;
++  f.a1 = -2.0 * c / a0;
++  f.a2 = (1.0 - alpha) / a0;
++  return f;
++}
++
++Biquad makeNotch(double f0, double q, double fs) {
++  const double w = 2.0 * M_PI * f0 / fs, alpha = tan(w / (2.0 * q));
++  Biquad f;
++  f.b0 = 1.0 / (1.0 + alpha);
++  f.b1 = -2.0 * cos(w) / (1.0 + alpha);
++  f.b2 = f.b0;
++  f.a1 = f.b1;
++  f.a2 = (1.0 - alpha) / (1.0 + alpha);
++  return f;
++}
++
++// 監護頻寬：0.5 Hz 高通（去基線漂移）→ 60 Hz notch → 40 Hz 低通（去肌電/殘餘雜訊）
++struct MonitorFilter {
++  Biquad hp = makeHighpass(0.5, OUTPUT_FS);
++  Biquad notch = makeNotch(60.0, 30.0, OUTPUT_FS);
++  Biquad lp = makeLowpass(40.0, OUTPUT_FS);
++  bool primed = false;
+ 
++  void reset() { primed = false; }
++
++  double process(double x) {
++    if (!primed) {
++      lp.prime(notch.prime(hp.prime(x)));
++      primed = true;
++    }
++    return lp.process(notch.process(hp.process(x)));
++  }
++};
++
++MonitorFilter monitorFilter;
++
++// ---------------------------------------------------------------------
++// 取樣端（core 0）→ 輸出端（core 1）之間的單生產者/單消費者環形緩衝
++// ---------------------------------------------------------------------
++struct OutSample {
++  uint32_t ms;
++  uint16_t adc;
++  uint8_t status;
++};
++
++constexpr uint32_t RING_SIZE = 512;  // 2 的次方；約 2 秒緩衝
++OutSample ring[RING_SIZE];
++std::atomic<uint32_t> ringHead{0};
++std::atomic<uint32_t> ringTail{0};
++volatile uint32_t droppedSamples = 0;
++
++bool ringPush(const OutSample& s) {
++  uint32_t head = ringHead.load(std::memory_order_relaxed);
++  if (head - ringTail.load(std::memory_order_acquire) >= RING_SIZE) {
++    droppedSamples = droppedSamples + 1;
++    return false;
++  }
++  ring[head & (RING_SIZE - 1)] = s;
++  ringHead.store(head + 1, std::memory_order_release);
++  return true;
++}
++
++bool ringPop(OutSample& s) {
++  uint32_t tail = ringTail.load(std::memory_order_relaxed);
++  if (tail == ringHead.load(std::memory_order_acquire)) {
++    return false;
++  }
++  s = ring[tail & (RING_SIZE - 1)];
++  ringTail.store(tail + 1, std::memory_order_release);
++  return true;
++}
++
++// ---------------------------------------------------------------------
++// 取樣端狀態（只在取樣工作中使用）
++// ---------------------------------------------------------------------
++int tickPhase = 0;
++uint32_t accSum = 0;
++bool accHigh = false;
++bool accLow = false;
++bool accOff = false;
+ bool contactActive = false;
++uint32_t contactStartMs = 0;
++
++// 每 1 ms 呼叫一次。nowMs 由 FreeRTOS tick 決定，輸出時間戳一定剛好相差 4 ms。
++void samplerTick(uint32_t nowMs) {
++  bool off =
++    digitalRead(LO_PLUS_PIN) == HIGH ||
++    digitalRead(LO_MINUS_PIN) == HIGH;
++
++  if (off) {
++    accOff = true;
++  } else {
++    for (int i = 0; i < ADC_BURST; i++) {
++      int v = analogRead(ECG_PIN);
++      accSum += (uint32_t)v;
++      if (v >= 4095) accHigh = true;
++      if (v <= 0) accLow = true;
++    }
++  }
+ 
++  if (++tickPhase < DECIMATE) {
++    return;
++  }
++  tickPhase = 0;
++
++  OutSample s;
++  s.ms = nowMs;
++
++  if (accOff) {
++    contactActive = false;
++    s.adc = 0;
++    s.status = STATUS_OFF;
++  } else {
++    if (!contactActive) {
++      contactActive = true;
++      contactStartMs = nowMs;
++    }
++    constexpr uint32_t N = ADC_BURST * DECIMATE;
++    uint32_t avg = (accSum + N / 2) / N;
++    if (accHigh) avg = 4095;       // 飽和要讓網頁看得到，不被平均掉
++    else if (accLow) avg = 0;
++    s.adc = (uint16_t)avg;
++    // 重新接觸後等待 3 秒。
++    s.status = (nowMs - contactStartMs < 3000) ? STATUS_WAIT : STATUS_RUN;
++  }
++
++  accSum = 0;
++  accHigh = accLow = accOff = false;
++  ringPush(s);
++}
++
++#if defined(ESP32)
++#if configTICK_RATE_HZ != 1000
++#error "This sketch expects FreeRTOS tick = 1 ms (Arduino-ESP32 default)."
++#endif
++void samplerTask(void*) {
++  TickType_t lastWake = xTaskGetTickCount();
++  for (;;) {
++    vTaskDelayUntil(&lastWake, 1);
++    samplerTick((uint32_t)lastWake);
++  }
++}
++#endif
++
++// ---------------------------------------------------------------------
++// 輸出端狀態（loop() / core 1）
++// ---------------------------------------------------------------------
+ int graphX = GRAPH_LEFT;
+ int previousY = 0;
+ bool previousPointValid = false;
+ 
+ int bucketCount = 0;
+-int bucketMin = 4095;
+-int bucketMax = 0;
++double bucketMin = 0;
++double bucketMax = 0;
+ 
+ int displayedStatus = -1;
+-
+-// 狀態代碼
+-constexpr int STATUS_OFF  = 0;
+-constexpr int STATUS_WAIT = 1;
+-constexpr int STATUS_RUN  = 2;
++bool clipShown = false;
++uint32_t lastClipMs = 0;
++bool clipSeen = false;
+ 
+ void resetBucket() {
+   bucketCount = 0;
+-  bucketMin = 4095;
+-  bucketMax = 0;
++  bucketMin = 1e9;
++  bucketMax = -1e9;
+ }
+ 
+-// 將 ADC 數值換算為畫面高度。
+-// ADC 越大，畫面位置越高。
+-int adcToY(int value) {
+-  value = constrain(value, 0, 4095);
++// mV → 畫面 y。超出範圍就貼齊上下邊。
++int mvToY(double mv) {
++  int y = BASELINE_Y - (int)lround(mv * TFT_PX_PER_MV);
++  return constrain(y, GRAPH_TOP, GRAPH_BOTTOM);
++}
+ 
+-  return GRAPH_BOTTOM -
+-         (int)((long)value *
+-               (GRAPH_BOTTOM - GRAPH_TOP) / 4095L);
++bool isMajorRow(int y) {
++  return ((y - BASELINE_Y) % (GRID_STEP * 5)) == 0;
+ }
+ 
+ void drawGraphBackground() {
+   tft.fillRect(
+-    GRAPH_LEFT,
+-    GRAPH_TOP,
++    GRAPH_LEFT, GRAPH_TOP,
+     GRAPH_RIGHT - GRAPH_LEFT + 1,
+     GRAPH_BOTTOM - GRAPH_TOP + 1,
+     ILI9341_BLACK
+   );
+ 
+-  for (int x = GRAPH_LEFT; x <= GRAPH_RIGHT; x += 25) {
+-    tft.drawFastVLine(
+-      x, GRAPH_TOP,
+-      GRAPH_BOTTOM - GRAPH_TOP + 1,
+-      GRID_COLOR
+-    );
++  for (int x = GRAPH_LEFT; x <= GRAPH_RIGHT; x += GRID_STEP) {
++    bool major = ((x - GRAPH_LEFT) % (GRID_STEP * 5)) == 0;  // 1 秒
++    tft.drawFastVLine(x, GRAPH_TOP, GRAPH_BOTTOM - GRAPH_TOP + 1,
++                      major ? GRID_MAJOR : GRID_COLOR);
+   }
+ 
+-  for (int y = GRAPH_TOP; y <= GRAPH_BOTTOM; y += 25) {
+-    tft.drawFastHLine(
+-      GRAPH_LEFT, y,
+-      GRAPH_RIGHT - GRAPH_LEFT + 1,
+-      GRID_COLOR
+-    );
++  for (int y = BASELINE_Y; y >= GRAPH_TOP; y -= GRID_STEP) {
++    tft.drawFastHLine(GRAPH_LEFT, y, GRAPH_RIGHT - GRAPH_LEFT + 1,
++                      isMajorRow(y) ? GRID_MAJOR : GRID_COLOR);
++  }
++  for (int y = BASELINE_Y + GRID_STEP; y <= GRAPH_BOTTOM; y += GRID_STEP) {
++    tft.drawFastHLine(GRAPH_LEFT, y, GRAPH_RIGHT - GRAPH_LEFT + 1,
++                      isMajorRow(y) ? GRID_MAJOR : GRID_COLOR);
+   }
+ 
+   tft.drawRect(
+-    GRAPH_LEFT - 1,
+-    GRAPH_TOP - 1,
++    GRAPH_LEFT - 1, GRAPH_TOP - 1,
+     GRAPH_RIGHT - GRAPH_LEFT + 3,
+     GRAPH_BOTTOM - GRAPH_TOP + 3,
+     ILI9341_WHITE
+@@ -104,22 +322,19 @@ void drawGraphBackground() {
+ 
+ // 擦除一欄舊波形，同時補回格線。
+ void clearColumn(int x) {
+-  tft.drawFastVLine(
+-    x, GRAPH_TOP,
+-    GRAPH_BOTTOM - GRAPH_TOP + 1,
+-    ILI9341_BLACK
+-  );
++  if ((x - GRAPH_LEFT) % GRID_STEP == 0) {
++    bool major = ((x - GRAPH_LEFT) % (GRID_STEP * 5)) == 0;
++    tft.drawFastVLine(x, GRAPH_TOP, GRAPH_BOTTOM - GRAPH_TOP + 1,
++                      major ? GRID_MAJOR : GRID_COLOR);
++    return;
++  }
+ 
+-  if ((x - GRAPH_LEFT) % 25 == 0) {
+-    tft.drawFastVLine(
+-      x, GRAPH_TOP,
+-      GRAPH_BOTTOM - GRAPH_TOP + 1,
+-      GRID_COLOR
+-    );
+-  } else {
+-    for (int y = GRAPH_TOP; y <= GRAPH_BOTTOM; y += 25) {
+-      tft.drawPixel(x, y, GRID_COLOR);
+-    }
++  tft.drawFastVLine(x, GRAPH_TOP, GRAPH_BOTTOM - GRAPH_TOP + 1, ILI9341_BLACK);
++  for (int y = BASELINE_Y; y >= GRAPH_TOP; y -= GRID_STEP) {
++    tft.drawPixel(x, y, isMajorRow(y) ? GRID_MAJOR : GRID_COLOR);
++  }
++  for (int y = BASELINE_Y + GRID_STEP; y <= GRAPH_BOTTOM; y += GRID_STEP) {
++    tft.drawPixel(x, y, isMajorRow(y) ? GRID_MAJOR : GRID_COLOR);
+   }
+ }
+ 
+@@ -129,6 +344,7 @@ void showStatus(int status) {
+   }
+ 
+   displayedStatus = status;
++  clipShown = false;
+ 
+   tft.fillRect(0, 27, 320, 29, ILI9341_BLACK);
+   tft.setCursor(10, 32);
+@@ -146,28 +362,33 @@ void showStatus(int status) {
+   }
+ }
+ 
+-void drawWaveColumn(int lastValue) {
++// 最近 2 秒內有 ADC 撞到 0/4095 時，在右上角顯示 CLIP。
++void showClip(bool clipping) {
++  if (clipping == clipShown) {
++    return;
++  }
++  clipShown = clipping;
++  tft.fillRect(230, 27, 90, 29, ILI9341_BLACK);
++  if (clipping) {
++    tft.setCursor(240, 32);
++    tft.setTextSize(2);
++    tft.setTextColor(ILI9341_RED);
++    tft.print("CLIP!");
++  }
++}
++
++void drawWaveColumn(double lastMv) {
+   clearColumn(graphX);
+ 
+-  int lastY = adcToY(lastValue);
+-  int topY = adcToY(bucketMax);
+-  int bottomY = adcToY(bucketMin);
++  int lastY = mvToY(lastMv);
++  int topY = mvToY(bucketMax);
++  int bottomY = mvToY(bucketMin);
+ 
+-  // 連接前一欄與目前這一欄。
+   if (previousPointValid && graphX > GRAPH_LEFT) {
+-    tft.drawLine(
+-      graphX - 1, previousY,
+-      graphX, lastY,
+-      ILI9341_GREEN
+-    );
++    tft.drawLine(graphX - 1, previousY, graphX, lastY, ILI9341_GREEN);
+   }
+ 
+-  // 顯示本欄資料的最大、最小範圍。
+-  tft.drawFastVLine(
+-    graphX, topY,
+-    bottomY - topY + 1,
+-    ILI9341_GREEN
+-  );
++  tft.drawFastVLine(graphX, topY, bottomY - topY + 1, ILI9341_GREEN);
+ 
+   previousY = lastY;
+   previousPointValid = true;
+@@ -192,6 +413,45 @@ void sendSample(uint32_t timestampMs, int rawValue, int status) {
+   }
+ }
+ 
++void handleOutput(const OutSample& s) {
++  sendSample(s.ms, s.adc, s.status);
++
++  if (s.status == STATUS_OFF) {
++    monitorFilter.reset();
++    previousPointValid = false;
++    resetBucket();
++    showStatus(STATUS_OFF);
++    return;
++  }
++
++  if (s.adc == 0 || s.adc == 4095) {
++    lastClipMs = s.ms;
++    clipSeen = true;
++  }
++
++  // 等待期間濾波器照樣運作（暖機），但不畫圖。
++  double mv = monitorFilter.process((double)s.adc) / COUNTS_PER_MV;
++
++  if (s.status == STATUS_WAIT) {
++    previousPointValid = false;
++    resetBucket();
++    showStatus(STATUS_WAIT);
++    return;
++  }
++
++  showStatus(STATUS_RUN);
++  showClip(clipSeen && (s.ms - lastClipMs) < 2000);
++
++  if (mv < bucketMin) bucketMin = mv;
++  if (mv > bucketMax) bucketMax = mv;
++  bucketCount++;
++
++  if (bucketCount >= SAMPLES_PER_COLUMN) {
++    drawWaveColumn(mv);
++    resetBucket();
++  }
++}
++
+ void setup() {
+   Serial.begin(115200); // Do not wait for USB; standalone TFT must still work.
+   pinMode(LO_PLUS_PIN, INPUT);
+@@ -213,81 +473,28 @@ void setup() {
+   tft.setCursor(10, 5);
+   tft.print("ECG LIVE WAVEFORM");
+ 
++  resetBucket();
+   drawGraphBackground();
+ 
+   tft.setTextSize(1);
+   tft.setTextColor(ILI9341_WHITE);
+   tft.setCursor(10, 229);
+-  tft.print("RAW ADC | Battery only on body");
++  tft.print("0.5-40Hz+60Hz notch 25mm/s 20mm/mV");
+ 
+   showStatus(STATUS_OFF);
+ 
+-  nextSampleUs = micros() + SAMPLE_INTERVAL_US;
++#if defined(ESP32)
++  // 取樣放在 core 0，Arduino loop()（繪圖、USB）在 core 1。
++  xTaskCreatePinnedToCore(samplerTask, "ecg-sampler", 4096, nullptr,
++                          5, nullptr, 0);
++#endif
+ }
+ 
+ void loop() {
+-  uint32_t nowUs = micros();
+-
+-  // 還沒到取樣時間，先返回。
+-  if ((int32_t)(nowUs - nextSampleUs) < 0) {
+-    return;
+-  }
+-
+-  nextSampleUs += SAMPLE_INTERVAL_US;
+-
+-  // 若繪圖造成延遲，不快速補讀多筆假裝補回取樣。
+-  if ((int32_t)(nowUs - nextSampleUs) >= 0) {
+-    nextSampleUs = nowUs + SAMPLE_INTERVAL_US;
++  OutSample s;
++  int handled = 0;
++  while (handled < 32 && ringPop(s)) {
++    handleOutput(s);
++    handled++;
+   }
+-
+-  uint32_t sampleMs = millis();
+-
+-  bool leadsOff =
+-    digitalRead(LO_PLUS_PIN) == HIGH ||
+-    digitalRead(LO_MINUS_PIN) == HIGH;
+-
+-  // 電極脫落：停止畫新波形。
+-  if (leadsOff) {
+-    contactActive = false;
+-    previousPointValid = false;
+-    resetBucket();
+-    showStatus(STATUS_OFF);
+-    sendSample(sampleMs, 0, STATUS_OFF);
+-    return;
+-  }
+-
+-  // 剛重新接觸，先等待訊號穩定。
+-  if (!contactActive) {
+-    contactActive = true;
+-    contactStartMs = millis();
+-    previousPointValid = false;
+-    resetBucket();
+-    showStatus(STATUS_WAIT);
+-  }
+-
+-  int rawValue = analogRead(ECG_PIN);
+-
+-  // 重新接觸後等待 3 秒。
+-  if (millis() - contactStartMs < 3000) {
+-    sendSample(sampleMs, rawValue, STATUS_WAIT);
+-    return;
+-  }
+-
+-  sendSample(sampleMs, rawValue, STATUS_RUN);
+-  showStatus(STATUS_RUN);
+-
+-  if (rawValue < bucketMin) {
+-    bucketMin = rawValue;
+-  }
+-
+-  if (rawValue > bucketMax) {
+-    bucketMax = rawValue;
+-  }
+-
+-  bucketCount++;
+-
+-  if (bucketCount >= SAMPLES_PER_COLUMN) {
+-    drawWaveColumn(rawValue);
+-    resetBucket();
+-  }
+-}
+\ No newline at end of file
++}
+diff --git a/index.html b/index.html
+index e0d5a30..225db4e 100644
+--- a/index.html
++++ b/index.html
+@@ -75,7 +75,8 @@
+         gap: 12px;
+       }
+       button,
+-      select {
++      select,
++      input[type="number"] {
+         font: inherit;
+         border: 1px solid #3a4d65;
+         border-radius: 8px;
+@@ -136,6 +137,12 @@
+         border-radius: 8px;
+         background: #0b1521;
+       }
++      input[type="number"] {
++        width: 110px;
++      }
++      .paper-settings {
++        margin-top: 12px;
++      }
+       .legend {
+         display: flex;
+         justify-content: space-between;
+@@ -259,15 +266,34 @@
+             ><button id="export" disabled>匯出即時緩衝</button>
+             <label for="view">波形顯示</label
+             ><select id="view">
++              <option value="paper" selected>心電圖紙（監護濾波，mV）</option>
+               <option value="raw">原始波形</option>
+               <option value="filtered">60 Hz 濾波波形</option>
+-              <option value="compare" selected>上下比較</option>
++              <option value="compare">上下比較</option>
+             </select>
+           </div>
+         </div>
++        <div class="toolbar paper-settings">
++          <label for="gain">類比總增益（含分壓）</label
++          ><input
++            id="gain"
++            type="number"
++            min="10"
++            max="5000"
++            step="10"
++            value="1100"
++          /><label for="lead">導程標示</label
++          ><select id="lead">
++            <option value="Lead II" selected>Lead II（RA−、LL+）</option>
++            <option value="Lead I">Lead I（RA−、LA+）</option>
++            <option value="Lead III">Lead III（LA−、LL+）</option>
++          </select>
++        </div>
+         <p id="filter-info">
+-          二階 IIR notch · Fs 250 Hz · 60 Hz · Q＝30 · 啟動/中斷後暖機 250
+-          筆（約 1 秒）。因果濾波會產生頻率相關相位延遲，非固定延遲、非零相位。
++          心電圖紙：0.5 Hz 高通 + 60 Hz notch + 40 Hz 低通（監護頻寬），25 mm/s、10
++          mm/mV，左側為 1 mV 校正方波。即時資料為因果濾波；載入 CSV
++          時改用前後雙向（零相位）濾波，P/QRS/T 形狀不因相位延遲而變形。mV
++          由「增益」換算，ESP32 ADC 非線性，數值為近似。
+         </p>
+         <p id="filter-state" role="status">等待資料</p>
+         <p id="saturation" role="status">
+@@ -279,7 +305,7 @@
+           aria-label="心電波形比較：共用時間軸與 ADC 尺度；原始值保持不變"
+         ></canvas>
+         <div class="legend">
+-          <span>共用尺度 −512–4607 · 黃色為暖機 · 紅點為原始 ADC 飽和值</span
++          <span id="legend-scale">共用尺度 −512–4607 · 黃色為暖機 · 紅點為原始 ADC 飽和值</span
+           ><span id="buffer">保留最近 60 秒，最多 15,000 筆</span>
+         </div>
+       </section>
+@@ -693,7 +719,10 @@
+           const rows = ECG.parseCSV(await file.text());
+           reset();
+           processor.reset("csv-import");
+-          importedRows = rows.map((row) => processor.process(row));
++          // Stored data: monitor channel recomputed forward-backward (zero phase).
++          importedRows = ECG.zeroPhase(
++            rows.map((row) => processor.process(row)),
++          );
+           mode = rows[0].source;
+           for (const row of importedRows) live.push(row);
+           samples = live.items;
+@@ -736,9 +765,131 @@
+       }
+       const canvas = $("wave"),
+         ctx = canvas.getContext("2d");
++      // ECG paper geometry: 25 mm/s and 10 mm/mV share the same px-per-mm, so
++      // the aspect ratio matches real ECG paper on any screen.
++      function paperGeometry(width) {
++        const windowSec = Number($("window").value),
++          calMm = 10,
++          pxPerMm = Math.max(2.5, (width - 16) / (25 * windowSec + calMm)),
++          left = calMm * pxPerMm + 8,
++          plotW = width - left - 8,
++          topMv = 3,
++          bottomMv = -2,
++          header = 26;
++        return {
++          pxPerMm,
++          left,
++          topMv,
++          header,
++          duration: (plotW / pxPerMm / 25) * 1000,
++          height: Math.round(header + (topMv - bottomMv) * 10 * pxPerMm + 24),
++        };
++      }
++      function countsPerMv() {
++        const gain = Number($("gain").value);
++        return ((gain > 0 ? gain : 1100) * 4095) / 3300;
++      }
++      function drawPaper(visible, start, w, h, g) {
++        const p = g.pxPerMm,
++          left = g.left,
++          right = w - 8,
++          top = g.header,
++          bottom = h - 24,
++          y0 = top + g.topMv * 10 * p,
++          perMv = countsPerMv();
++        ctx.fillStyle = "#fff7f5";
++        ctx.fillRect(0, 0, w, h);
++        ctx.lineWidth = 1;
++        for (let mm = -Math.floor(left / p); left + mm * p <= right; mm++) {
++          const major = mm % 5 === 0;
++          if (!major && p < 3) continue;
++          const x = Math.round(left + mm * p) + 0.5;
++          ctx.strokeStyle = major ? "#e79a9a" : "#f7d4d4";
++          ctx.beginPath();
++          ctx.moveTo(x, top);
++          ctx.lineTo(x, bottom);
++          ctx.stroke();
++        }
++        for (
++          let mm = -Math.floor((y0 - top) / p);
++          y0 + mm * p <= bottom;
++          mm++
++        ) {
++          const major = mm % 5 === 0;
++          if (!major && p < 3) continue;
++          const y = Math.round(y0 + mm * p) + 0.5;
++          ctx.strokeStyle = major ? "#e79a9a" : "#f7d4d4";
++          ctx.beginPath();
++          ctx.moveTo(0, y);
++          ctx.lineTo(right, y);
++          ctx.stroke();
++        }
++        // 1 mV calibration pulse: 10 mm tall, 5 mm (0.2 s) wide.
++        ctx.strokeStyle = "#1b1b1b";
++        ctx.lineWidth = 1.6;
++        ctx.beginPath();
++        ctx.moveTo(left - 9 * p, y0);
++        ctx.lineTo(left - 7 * p, y0);
++        ctx.lineTo(left - 7 * p, y0 - 10 * p);
++        ctx.lineTo(left - 2 * p, y0 - 10 * p);
++        ctx.lineTo(left - 2 * p, y0);
++        ctx.lineTo(left, y0);
++        ctx.stroke();
++        const zero = visible.some((s) => s.zeroPhase);
++        ctx.fillStyle = "#8a2b2b";
++        ctx.font = "12px system-ui";
++        ctx.fillText(
++          `${$("lead").value} · 25 mm/s · 10 mm/mV · 0.5–40 Hz + 60 Hz notch · ${zero ? "零相位（CSV）" : "即時因果濾波"} · 增益 ${$("gain").value}`,
++          8,
++          17,
++        );
++        for (let t = Math.ceil(start / 1000); ; t++) {
++          const x = left + ((t * 1000 - start) / 1000) * 25 * p;
++          if (x > right) break;
++          ctx.fillText(t + "s", x - 8, bottom + 17);
++        }
++        ctx.save();
++        ctx.beginPath();
++        ctx.rect(left, top, right - left, bottom - top);
++        ctx.clip();
++        ctx.lineWidth = 1.4;
++        ctx.lineJoin = "round";
++        let previous = null;
++        for (const s of visible) {
++          if (s.status !== 2 || s.monitor === null) {
++            previous = null;
++            continue;
++          }
++          const x = left + ((s.time - start) / 1000) * 25 * p,
++            y = y0 - (s.monitor / perMv) * 10 * p;
++          ctx.strokeStyle = s.warmup ? "#c98a1e" : "#111";
++          ctx.beginPath();
++          if (
++            previous &&
++            s.segment === previous.segment &&
++            s.time - previous.time === 4
++          ) {
++            ctx.moveTo(previous.x, previous.y);
++            ctx.lineTo(x, y);
++          } else {
++            ctx.moveTo(x, y);
++            ctx.lineTo(x + 0.5, y);
++          }
++          ctx.stroke();
++          if (s.saturated) {
++            ctx.fillStyle = "#e0321c";
++            ctx.fillRect(x - 2, top + 2, 4, 6);
++          }
++          previous = { ...s, x, y };
++        }
++        ctx.restore();
++      }
+       function draw() {
+-        const targetHeight =
+-          $("view").value === "compare"
++        const paper = $("view").value === "paper",
++          geometry = paper ? paperGeometry(canvas.clientWidth || 800) : null;
++        const targetHeight = paper
++          ? geometry.height
++          : $("view").value === "compare"
+             ? innerWidth < 650
+               ? 540
+               : 620
+@@ -763,14 +914,24 @@
+           right = w - 12;
+         ctx.clearRect(0, 0, w, h);
+         ctx.font = "11px system-ui";
+-        const duration = Number($("window").value) * 1000;
++        const duration = paper
++          ? geometry.duration
++          : Number($("window").value) * 1000;
+         const data = paused ? frozen : importedRows || samples,
+           end = paused ? frozenEnd : displayEnd(data),
+           start = end - duration;
+         const visible = data.filter((s) => s.time >= start && s.time <= end);
+         const view = $("view").value;
+         // Same time and fixed vertical scale in every panel, including notch overshoot.
+-        const plots = view === "compare" ? ["raw", "filtered"] : [view];
++        if (paper) drawPaper(visible, start, w, h, geometry);
++        $("legend-scale").textContent = paper
++          ? "粉紅格線：小格 1 mm（0.04 s / 0.1 mV）、大格 5 mm（0.2 s / 0.5 mV） · 黃色為暖機 · 上方紅標為 ADC 飽和"
++          : "共用尺度 −512–4607 · 黃色為暖機 · 紅點為原始 ADC 飽和值";
++        const plots = paper
++          ? []
++          : view === "compare"
++            ? ["raw", "filtered"]
++            : [view];
+         const panelHeight = h / plots.length,
+           minADC = -512,
+           maxADC = 4607;
+diff --git a/tests/core.cjs b/tests/core.cjs
+index d3ccd78..e388737 100644
+--- a/tests/core.cjs
++++ b/tests/core.cjs
+@@ -150,3 +150,78 @@ assert.equal(duplicates[1].resetReason, "time-gap");
+ console.log(
+   "PASS: resets, 250-sample warmup, unchanged raw ADC, stopped recording immutable, 5-minute/75k caps, source isolation, CSV roundtrip, live buffer eviction",
+ );
++
++// ---- Monitoring band (0.5–40 Hz + 60 Hz notch) ----
++const { MonitorFilter, zeroPhase, MONITOR } = ECG;
++function toneGain(hz) {
++  const f = new MonitorFilter(),
++    x = [],
++    y = [];
++  for (let i = 0; i < 20000; i++) {
++    const v = 2000 + 300 * Math.sin((2 * Math.PI * hz * i) / MONITOR.fs);
++    const out = f.next(v);
++    if (i >= 5000) {
++      x.push(v - 2000);
++      y.push(out);
++    }
++  }
++  return amplitude(y, hz) / amplitude(x, hz);
++}
++const g = {
++  0.1: toneGain(0.1),
++  1: toneGain(1),
++  10: toneGain(10),
++  40: toneGain(40),
++  60: toneGain(60),
++  100: toneGain(100),
++};
++assert.ok(g[0.1] < 0.05, "baseline wander removed");
++assert.ok(g[1] > 0.95 && g[10] > 0.95 && g[10] < 1.01, "ECG band kept");
++assert.ok(Math.abs(20 * Math.log10(g[40]) + 3.01) < 0.1, "-3 dB at 40 Hz");
++assert.ok(g[60] < 1e-3 && g[100] < 0.05, "mains and HF removed");
++console.log(
++  "Monitor band gains: " +
++    Object.entries(g)
++      .map(([k, v]) => `${k} Hz ${(20 * Math.log10(v)).toFixed(2)} dB`)
++      .join(", "),
++);
++// Constant input: no start-up step, output centred on 0.
++const flat = new MonitorFilter();
++for (let i = 0; i < 10; i++) assert.ok(Math.abs(flat.next(2048)) < 1e-9);
++// Processor carries monitor channel, reset with notch, null when invalid.
++const mp = new Processor();
++let m = mp.process({ time: 0, ms: 0, adc: 2048, status: 2, source: "usb" });
++assert.ok(Math.abs(m.monitor) < 1e-9);
++m = mp.process({ time: 4, ms: 4, adc: 2048, status: 0, source: "usb" });
++assert.equal(m.monitor, null);
++// Zero-phase: a symmetric pulse stays symmetric about its peak (no phase lag).
++const pulseRows = [];
++const zp = new Processor();
++for (let i = 0; i < 2500; i++) {
++  const t = (i - 1250) / 250;
++  pulseRows.push(
++    zp.process({
++      time: i * 4,
++      ms: i * 4,
++      adc: Math.round(2048 + 400 * Math.exp(-((t / 0.04) ** 2))),
++      status: 2,
++      source: "usb",
++    }),
++  );
++}
++const zrows = zeroPhase(pulseRows);
++const peak = zrows.reduce((b, s, i) => (s.monitor > zrows[b].monitor ? i : b), 0);
++const causalPeak = pulseRows.reduce(
++  (b, s, i) => (s.monitor > pulseRows[b].monitor ? i : b),
++  0,
++);
++assert.equal(peak, 1250, "zero-phase peak not shifted");
++assert.ok(causalPeak > 1250, "causal filter delays the peak");
++for (let k = 1; k < 40; k++)
++  assert.ok(Math.abs(zrows[1250 - k].monitor - zrows[1250 + k].monitor) < 0.5);
++assert.equal(Object.isFrozen(zrows[0]), true);
++assert.equal(pulseRows[1250].zeroPhase, false);
++assert.ok(toCSV(zrows).split("\n")[0].endsWith("monitor_adc,monitor_zero_phase,monitor_version"));
++console.log(
++  `PASS: monitor band, no start-up step, zero-phase peak at ${peak} (causal ${causalPeak}), CSV monitor columns`,
++);
+diff --git a/tests/firmware.cpp b/tests/firmware.cpp
+index cdfc7b5..d15c976 100644
+--- a/tests/firmware.cpp
++++ b/tests/firmware.cpp
+@@ -1,14 +1,85 @@
+ #include <cassert>
++#include <cmath>
+ #include <iostream>
+ #include "../firmware/ECGSerial/ECGSerial.ino"
+-int main(){
+- static_assert(TFT_CS==27&&TFT_DC==25&&TFT_RST==26&&TFT_SCK==18&&TFT_MOSI==23);
+- static_assert(ECG_PIN==34&&LO_PLUS_PIN==13&&LO_MINUS_PIN==14);
+- setup();lead=1;clockUs=4000;loop();assert(Serial.output=="4,0,0\n");
+- lead=0;clockUs=8000;loop();assert(displayedStatus==STATUS_WAIT);assert(Serial.output.find("8,2048,1\n")!=std::string::npos);
+- clockUs=3008000;loop();assert(displayedStatus==STATUS_RUN);assert(Serial.output.find("3008,2048,2\n")!=std::string::npos);
+- int before=tft.columns;for(int i=0;i<5;i++){clockUs+=4000;loop();}assert(tft.columns>before);
+- Serial.room=0;auto size=Serial.output.size();clockUs+=4000;loop();assert(Serial.output.size()==size);
+- lead=1;clockUs+=4000;loop();assert(displayedStatus==STATUS_OFF&&bucketCount==0&&!previousPointValid);
+- std::cout<<"PASS: original pins, lead-off CSV, settling CSV, ready CSV, TFT drawing, nonblocking TX, lead-off reset\n";
++
++static void tick(uint32_t ms) { samplerTick(ms); loop(); }
++
++static double toneAmplitude(double hz, double fs) {
++  MonitorFilter f;
++  double re = 0, im = 0;
++  int n = 0;
++  for (int i = 0; i < 20000; i++) {
++    double x = 2000 + 300 * sin(2 * M_PI * hz * i / fs);
++    double y = f.process(x);
++    if (i >= 5000) {
++      re += y * cos(2 * M_PI * hz * i / fs);
++      im -= y * sin(2 * M_PI * hz * i / fs);
++      n++;
++    }
++  }
++  return 2 * std::hypot(re, im) / n / 300;
++}
++
++int main() {
++  static_assert(TFT_CS == 27 && TFT_DC == 25 && TFT_RST == 26 && TFT_SCK == 18 && TFT_MOSI == 23);
++  static_assert(ECG_PIN == 34 && LO_PLUS_PIN == 13 && LO_MINUS_PIN == 14);
++
++  // Coefficients equal scipy.signal.butter(2, fc, fs=250).
++  Biquad hp = makeHighpass(0.5, 250), lp = makeLowpass(40, 250);
++  assert(std::fabs(hp.b0 - 0.991153595101663) < 1e-12 && std::fabs(hp.a1 + 1.9822289297925284) < 1e-12 && std::fabs(hp.a2 - 0.9823854506141251) < 1e-12);
++  assert(std::fabs(lp.b0 - 0.1453238838770424) < 1e-12 && std::fabs(lp.a1 + 0.6710290907740961) < 1e-12 && std::fabs(lp.a2 - 0.2523246262822658) < 1e-12);
++
++  // Monitor band: 0.1 Hz drift removed, 10 Hz kept, 60 Hz and 100 Hz removed.
++  double g01 = toneAmplitude(0.1, 250), g10 = toneAmplitude(10, 250), g60 = toneAmplitude(60, 250), g100 = toneAmplitude(100, 250);
++  assert(g01 < 0.05 && g10 > 0.95 && g10 < 1.01 && g60 < 0.001 && g100 < 0.15);
++  std::cout << "Monitor filter gain: 0.1Hz " << g01 << ", 10Hz " << g10 << ", 60Hz " << g60 << ", 100Hz " << g100 << "\n";
++
++  setup();
++  // Lead off: one output every 4 ticks, exact 4 ms timestamps.
++  lead = 1;
++  for (uint32_t ms = 1; ms <= 4; ms++) tick(ms);
++  assert(Serial.output == "4,0,0\n");
++  assert(displayedStatus == STATUS_OFF);
++
++  // Contact: average of 16 reads, settling for 3 s.
++  lead = 0; raw = 2048;
++  for (uint32_t ms = 5; ms <= 8; ms++) tick(ms);
++  assert(Serial.output.find("8,2048,1\n") != std::string::npos);
++  assert(displayedStatus == STATUS_WAIT);
++
++  // Saturation in a single sub-read must survive averaging.
++  raw = 4095; tick(9); raw = 2048;
++  for (uint32_t ms = 10; ms <= 12; ms++) tick(ms);
++  assert(Serial.output.find("12,4095,1\n") != std::string::npos);
++  raw = 1; tick(13); raw = 0; tick(14); raw = 2048; tick(15); tick(16);
++  assert(Serial.output.find("16,0,1\n") != std::string::npos);
++
++  for (uint32_t ms = 17; ms <= 3008; ms++) tick(ms);
++  assert(Serial.output.find("3008,2048,2\n") != std::string::npos);
++  assert(displayedStatus == STATUS_RUN);
++
++  int before = tft.columns;
++  for (uint32_t ms = 3009; ms <= 3028; ms++) tick(ms);  // 5 outputs → one column
++  assert(tft.columns > before);
++
++  // Non-blocking USB: a full TX buffer drops the record but keeps the TFT running.
++  Serial.room = 0;
++  auto size = Serial.output.size();
++  for (uint32_t ms = 3029; ms <= 3032; ms++) tick(ms);
++  assert(Serial.output.size() == size);
++  Serial.room = 100;
++
++  // Lead off resets drawing state.
++  lead = 1;
++  for (uint32_t ms = 3033; ms <= 3036; ms++) tick(ms);
++  assert(displayedStatus == STATUS_OFF && bucketCount == 0 && !previousPointValid);
++  assert(Serial.output.find("3036,0,0\n") != std::string::npos);
++
++  // Ring buffer never blocks the sampler: overflow is counted, not waited on.
++  lead = 0;
++  for (uint32_t ms = 4001; ms <= 4000 + 4 * (RING_SIZE + 10); ms++) samplerTick(ms);
++  assert(droppedSamples >= 10);
++
++  std::cout << "PASS: pins, 1 kHz→250 Hz decimation, exact 4 ms timestamps, sticky saturation, settling, TFT drawing, non-blocking TX, lead-off reset, ring overflow\n";
+ }
+diff --git a/tests/scipy-reference.py b/tests/scipy-reference.py
+index 58f388e..8d89cf9 100644
+--- a/tests/scipy-reference.py
++++ b/tests/scipy-reference.py
+@@ -18,3 +18,19 @@ np.testing.assert_allclose(data['a'], a, rtol=0, atol=1e-14)
+ y, _ = lfilter(b, a, data['x'], zi=lfilter_zi(b, a)*data['x'][0])
+ np.testing.assert_allclose(data['y'], y, rtol=0, atol=1e-9)
+ print(f'PASS: scipy.signal.iirnotch coefficients and lfilter output; max error {np.max(np.abs(y-data["y"])):.3g} ADC')
++
++# Monitoring band: JS MonitorFilter == scipy butter(2) HP 0.5 -> iirnotch 60 -> butter(2) LP 40,
++# each stage started from its constant-input steady state.
++from scipy.signal import butter
++result = subprocess.run([
++    'node', '-e', '''const {MonitorFilter}=require('./ecg-core.js');const f=new MonitorFilter();
++    const x=Array.from({length:3000},(_,i)=>2000+300*Math.sin(2*Math.PI*1.2*i/250)+80*Math.sin(2*Math.PI*60*i/250)+40*Math.sin(2*Math.PI*0.2*i/250));
++    console.log(JSON.stringify({x,y:x.map(v=>f.next(v))}));'''
++], cwd=root, capture_output=True, text=True, check=True)
++data = json.loads(result.stdout)
++stages = [butter(2, 0.5, 'highpass', fs=250), iirnotch(60, 30, fs=250), butter(2, 40, 'lowpass', fs=250)]
++v = np.asarray(data['x'])
++for b, a in stages:
++    v, _ = lfilter(b, a, v, zi=lfilter_zi(b, a) * v[0])
++np.testing.assert_allclose(data['y'], v, rtol=0, atol=1e-8)
++print(f'PASS: monitor chain matches scipy butter/iirnotch cascade; max error {np.max(np.abs(v-data["y"])):.3g} ADC')
+-- 
+2.43.0
